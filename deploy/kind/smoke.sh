@@ -43,7 +43,7 @@ create_cluster() { # json body -> "op-id cluster-id"
 delete_timeline() { # cluster-id start-seconds
   while true; do
     sleep 20
-    echo "  [delete +$((SECONDS - $2))s] namespace: $(kubectl get ns "$1" -o json 2>/dev/null | jq -c '[.status.conditions[]? | select(.status=="True") | .type + ": " + (.message // "")]')"
+    echo "  [delete +$((SECONDS - $2))s] namespace: $(kubectl get ns "$1" -o json 2>/dev/null | jq -c '{phase: .status.phase, deletionTimestamp: .metadata.deletionTimestamp, finalizers: .spec.finalizers, conditions: [.status.conditions[]? | select(.status=="True") | .type + ": " + (.message // "")]}')"
     kubectl -n "$1" get pods -o json 2>/dev/null | jq -r '.items[] | "    pod " + .metadata.name + " gracePeriod=" + ((.metadata.deletionGracePeriodSeconds // "none") | tostring) + " deleting=" + ((.metadata.deletionTimestamp != null) | tostring) + " owner=" + ((.metadata.ownerReferences[0].kind) // "none")' 2>/dev/null || true
     kubectl -n "$1" get pvc,strimzipodset --no-headers 2>/dev/null | sed 's/^/    /' || true
   done
