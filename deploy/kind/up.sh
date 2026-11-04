@@ -30,7 +30,7 @@ kubectl create namespace "$OPNS" --dry-run=client -o yaml | kubectl apply -f -
 for f in "$STRIMZI_DIR"/*.yaml; do
   sed "s/namespace: myproject/namespace: $OPNS/" "$f"
   echo "---"
-done | kubectl apply --server-side -f - >/dev/null
+done | kubectl apply -n "$OPNS" --server-side -f - >/dev/null
 # Cluster-wide watching needs ClusterRoleBindings for the namespaced roles (Strimzi docs).
 for role in strimzi-cluster-operator-namespaced strimzi-cluster-operator-watched strimzi-entity-operator; do
   kubectl create clusterrolebinding "$role-all" --clusterrole="$role" \
