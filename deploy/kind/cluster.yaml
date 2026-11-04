@@ -1,6 +1,6 @@
 # Local cell: node pools are simulated with labels and taints (design §19).
 #   3 control-pool workers (zones a/b/c, taint streamcell.dev/control)
-#   3 shared-pool workers  (zones a/b/c)
+#   6 shared-pool workers  (two per zone: scale-out puts 6 brokers on 6 distinct nodes)
 #   3 spare workers        (zones a/b/c), tainted streamcell.dev/spare so nothing but DaemonSets runs
 #                          on them; the kind NodePoolProvider claims them for dedicated clusters by
 #                          swapping that taint for the owner's taint and adding the owner labels.
@@ -30,6 +30,12 @@ nodes:
         kind: JoinConfiguration
         nodeRegistration:
           taints: [{ key: streamcell.dev/control, value: "true", effect: NoSchedule }]
+  - role: worker
+    labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-a }
+  - role: worker
+    labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-b }
+  - role: worker
+    labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-c }
   - role: worker
     labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-a }
   - role: worker

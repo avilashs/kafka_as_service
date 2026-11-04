@@ -11,7 +11,10 @@
 #              gateway) with SCRAM, ACLs, Admin API and transactions; tenant isolation by
 #              credentials, CA and network. Implemented in connect.sh.
 #
-# usage: smoke.sh [dedicated|shared|connect|all]
+#   lifecycle  M4: config, resize, version upgrade, scale out and in, each under acks=all load with a
+#              verifier that proves no acknowledged record was lost. Implemented in lifecycle.sh.
+#
+# usage: smoke.sh [dedicated|shared|connect|lifecycle|all]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 STATE="$ROOT/.cache/kind"
@@ -325,12 +328,15 @@ scenario_shared() {
 
 # shellcheck source=deploy/kind/connect.sh
 source "$ROOT/deploy/kind/connect.sh"
+# shellcheck source=deploy/kind/lifecycle.sh
+source "$ROOT/deploy/kind/lifecycle.sh"
 
 case "${1:-all}" in
   dedicated) scenario_dedicated ;;
   shared)    scenario_shared ;;
   connect)   scenario_connect ;;
-  all)       scenario_dedicated; scenario_shared; scenario_connect ;;
-  *) echo "usage: $0 [dedicated|shared|connect|all]" >&2; exit 2 ;;
+  lifecycle) scenario_lifecycle ;;
+  all)       scenario_dedicated; scenario_shared; scenario_connect; scenario_lifecycle ;;
+  *) echo "usage: $0 [dedicated|shared|connect|lifecycle|all]" >&2; exit 2 ;;
 esac
 echo PASS

@@ -53,10 +53,10 @@ kubectl create namespace streamcell-system --dry-run=client -o yaml | kubectl ap
 for f in "$ROOT"/deploy/admission/policies/*.yaml; do
   sed 's#^  provisioners: ".*"#  provisioners: "kubernetes-admin"#' "$f" | kubectl apply -f -
 done
-(cd "$ROOT" && make images kafka-image)
+(cd "$ROOT" && make images kafka-image kafka-image-4.3.0)
 kind load docker-image streamcell/cell-tools:dev --name streamcell
 # The platform Kafka image (stock Strimzi image + the authorizer/policy plugins) must be on every node.
-kind load docker-image streamcell/kafka:4.3.1-dev --name streamcell
+kind load docker-image streamcell/kafka:4.3.1-dev streamcell/kafka:4.3.0-dev --name streamcell
 kubectl apply -f "$ROOT/deploy/admission/workloads/rbac.yaml" -f "$ROOT/deploy/admission/workloads/webhook-config.yaml" \
   -f "$ROOT/deploy/admission/workloads/admission.yaml" -f "$ROOT/deploy/admission/workloads/auditor.yaml"
 kubectl -n streamcell-system wait --for=condition=complete job/streamcell-admission-certgen --timeout=3m

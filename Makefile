@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt-check e2e-deps e2e images kafka-plugins kafka-image plugin-it kind-up kind-smoke kind-down
+.PHONY: build test vet fmt-check e2e-deps e2e images kafka-plugins kafka-image kafka-image-4.3.0 plugin-it kind-up kind-smoke kind-down
 
 build:
 	go build -o bin/ ./cmd/...
@@ -27,6 +27,10 @@ kafka-plugins:
 
 kafka-image: kafka-plugins
 	docker build -f deploy/images/kafka/Dockerfile --build-arg BASE=$(STRIMZI_KAFKA_IMAGE) -t streamcell/kafka:4.3.1-dev .
+
+# The kind cell offers 4.3.0 as well, so that a version upgrade can be exercised.
+kafka-image-4.3.0: kafka-plugins
+	docker build -f deploy/images/kafka/Dockerfile --build-arg BASE=quay.io/strimzi/kafka:1.3.0-kafka-4.3.0 -t streamcell/kafka:4.3.0-dev .
 
 plugin-it: kafka-plugins
 	KAFKA_IMAGE=$(STRIMZI_KAFKA_IMAGE) plugins/kafka/it/it.sh
