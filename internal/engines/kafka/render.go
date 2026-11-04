@@ -14,20 +14,22 @@ import (
 
 // Label keys; the engine-neutral ones live in the labels package.
 const (
-	LabelPrefix     = labels.Prefix
-	LabelCluster    = labels.Cluster
-	LabelTenant     = labels.Tenant
-	LabelTier       = labels.Tier
-	LabelRole       = labels.Role
-	LabelPool       = labels.NodePool
-	LabelInventory  = labels.Inventory
-	LabelShard      = labels.Shard
-	LabelDedOwner   = labels.DedicatedOwner
-	TaintDedicated  = labels.TaintDedicated
-	TaintControl    = labels.TaintControl
-	RoleBroker      = "kafka-broker"
-	RoleController  = "kafka-controller"
-	ExternalPort    = 9094
+	LabelPrefix    = labels.Prefix
+	LabelCluster   = labels.Cluster
+	LabelTenant    = labels.Tenant
+	LabelTier      = labels.Tier
+	LabelRole      = labels.Role
+	LabelPool      = labels.NodePool
+	LabelInventory = labels.Inventory
+	LabelShard     = labels.Shard
+	LabelDedOwner  = labels.DedicatedOwner
+	TaintDedicated = labels.TaintDedicated
+	TaintControl   = labels.TaintControl
+	RoleBroker     = "kafka-broker"
+	RoleController = "kafka-controller"
+	ExternalPort   = 9094
+	// MTLSPort is the external listener for certificate-authenticated clients (own hosts, own port: Q-4).
+	MTLSPort        = 9095
 	InternalTLSPort = 9093
 
 	// AuthorizerClass is the platform authorizer in the derived Kafka image (plugins/kafka).
@@ -89,6 +91,19 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 						// Only pods of this cluster's namespace (entity operator, Cruise Control). Without
 						// peers Strimzi would add a NetworkPolicy that opens the port to every pod.
 						"networkPolicyPeers": []any{map[string]any{"podSelector": map[string]any{}}},
+					},
+					map[string]any{
+						"name": "mtls", "port": MTLSPort, "type": "tlsroute", "tls": true,
+						"authentication":     map[string]any{"type": "tls"},
+						"networkPolicyPeers": gatewayPeers(env),
+						"configuration": map[string]any{
+							"bootstrap":    map[string]any{"host": host("mtls-bootstrap")},
+							"hostTemplate": host("m{nodeId}"),
+							"parentRefs": []any{map[string]any{
+								"group": "gateway.networking.k8s.io", "kind": "Gateway",
+								"name": env.GatewayName, "namespace": env.GatewayNS,
+							}},
+						},
 					},
 					map[string]any{
 						"name": "external", "port": ExternalPort, "type": "tlsroute", "tls": true,
@@ -170,7 +185,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	}
 
 	objs = append(objs, kafka, controllers, brokers)
-	userObjs, userSecrets := renderUsers(rs.ID, env.CellID, s, common)
+	userObjs, userSecrets, userCerts := renderUsers(rs.ID, env.CellID, s, common)
 	objs = append(objs, userObjs...)
 
 	b := &engine.Bundle{}
@@ -183,6 +198,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	}
 	b.DeleteGraceSeconds = 20
 	b.Secrets = userSecrets
+	b.CertRequests = userCerts
 	// The cluster CA certificate is public; tenants need it to trust the brokers.
 	b.Outputs = []engine.Output{{Name: "cluster-ca.crt", APIVersion: "v1", Kind: "Secret", Namespace: rs.ID,
 		ObjectName: rs.ID + "-cluster-ca-cert", Key: "ca.crt"}}
@@ -444,8 +460,11 @@ func netpolGatewayIngress(ns string, common map[string]any, env engine.CellEnv) 
 		"podSelector": map[string]any{"matchLabels": map[string]any{LabelRole: RoleBroker}},
 		"policyTypes": []any{"Ingress"},
 		"ingress": []any{map[string]any{
-			"from":  gatewayPeers(env),
-			"ports": []any{map[string]any{"protocol": "TCP", "port": ExternalPort}},
+			"from": gatewayPeers(env),
+			"ports": []any{
+				map[string]any{"protocol": "TCP", "port": ExternalPort},
+				map[string]any{"protocol": "TCP", "port": MTLSPort},
+			},
 		}},
 	})
 }

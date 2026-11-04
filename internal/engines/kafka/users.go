@@ -1,7 +1,12 @@
 package kafka
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"regexp"
 	"slices"
@@ -17,10 +22,30 @@ import (
 // password lives in the secret manager at secrets.UserPath, and SecretVersion only records which
 // version the rendered state refers to (it changes on rotation).
 type User struct {
-	Name          string `json:"name"`
-	Admin         bool   `json:"admin,omitempty"`
-	ACLs          []ACL  `json:"acls,omitempty"`
+	Name  string `json:"name"`
+	Admin bool   `json:"admin,omitempty"`
+	ACLs  []ACL  `json:"acls,omitempty"`
+	// Auth is "scram" (default) or "tls". A tls user authenticates with a client certificate that the cell
+	// signs for the public key in CSR; the private key never leaves the client.
+	Auth          string `json:"auth,omitempty"`
+	CSR           string `json:"csr,omitempty"`
 	SecretVersion int    `json:"secretVersion,omitempty"`
+}
+
+// Authentication mechanisms of a user.
+const (
+	AuthSCRAM = "scram"
+	AuthTLS   = "tls"
+)
+
+func (u User) isTLS() bool { return u.Auth == AuthTLS }
+
+// PrincipalName is the name the broker authorizes. A certificate subject "CN=x" makes principal "User:CN=x".
+func (u User) principalName() string {
+	if u.isTLS() {
+		return "CN=" + u.Name
+	}
+	return u.Name
 }
 
 // ACL grants operations on a resource to the user.
@@ -82,8 +107,22 @@ func validateUsers(users []User) error {
 		if !userNameRE.MatchString(u.Name) {
 			return engine.Invalid("user name %q must match %s", u.Name, userNamePattern)
 		}
-		if strings.HasPrefix(u.Name, "platform") || seen[u.Name] {
+		// "kc-" is the prefix of cluster ids, and the platform principals' certificates are named after them
+		// (CN=kc-<id>-entity-user-operator): a tenant must never be able to obtain a certificate with such a name.
+		if strings.HasPrefix(u.Name, "platform") || strings.HasPrefix(u.Name, "kc-") || seen[u.Name] {
 			return engine.Invalid("user name %q is reserved or duplicated", u.Name)
+		}
+		switch u.Auth {
+		case "", AuthSCRAM:
+			if u.CSR != "" {
+				return engine.Invalid("user %s: a certificate request needs auth \"tls\"", u.Name)
+			}
+		case AuthTLS:
+			if err := validateCSR(u.CSR); err != nil {
+				return engine.Invalid("user %s: %v", u.Name, err)
+			}
+		default:
+			return engine.Invalid("user %s: auth must be \"scram\" or \"tls\"", u.Name)
 		}
 		seen[u.Name] = true
 		if len(u.ACLs) > maxACLsPerUser {
@@ -94,6 +133,37 @@ func validateUsers(users []User) error {
 				return engine.Invalid("user %s: %v", u.Name, err)
 			}
 		}
+	}
+	return nil
+}
+
+// validateCSR accepts a PEM PKCS#10 request with a proven RSA (2048-4096 bit) or ECDSA (P-256, P-384) key.
+func validateCSR(p string) error {
+	if len(p) > 8192 {
+		return fmt.Errorf("the certificate request is too large")
+	}
+	blk, rest := pem.Decode([]byte(p))
+	if blk == nil || blk.Type != "CERTIFICATE REQUEST" || len(strings.TrimSpace(string(rest))) != 0 {
+		return fmt.Errorf("csr must be exactly one PEM \"CERTIFICATE REQUEST\"")
+	}
+	req, err := x509.ParseCertificateRequest(blk.Bytes)
+	if err != nil {
+		return fmt.Errorf("csr: %v", err)
+	}
+	if err := req.CheckSignature(); err != nil {
+		return fmt.Errorf("csr signature does not verify: %v", err)
+	}
+	switch k := req.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if k.N.BitLen() < 2048 || k.N.BitLen() > 4096 {
+			return fmt.Errorf("RSA keys must be 2048 to 4096 bits")
+		}
+	case *ecdsa.PublicKey:
+		if k.Curve != elliptic.P256() && k.Curve != elliptic.P384() {
+			return fmt.Errorf("ECDSA keys must use P-256 or P-384")
+		}
+	default:
+		return fmt.Errorf("the key must be RSA or ECDSA")
 	}
 	return nil
 }
@@ -143,6 +213,9 @@ func (e *Engine) AddUser(spec, req json.RawMessage) (json.RawMessage, string, er
 		return nil, "", engine.Invalid("invalid user: %v", err)
 	}
 	u.SecretVersion = 0 // set when the secret is created
+	if u.Auth == "" {
+		u.Auth = AuthSCRAM
+	}
 	s, err := parseSpecJSON(spec)
 	if err != nil {
 		return nil, "", err
@@ -182,7 +255,7 @@ func (e *Engine) RotateUser(spec json.RawMessage, name string) (json.RawMessage,
 		return nil, err
 	}
 	i := slices.IndexFunc(s.Users, func(u User) bool { return u.Name == name })
-	if i < 0 {
+	if i < 0 || s.Users[i].isTLS() { // certificates are renewed with a new request, not rotated
 		return nil, notFoundUser(name)
 	}
 	return json.Marshal(s)
@@ -202,6 +275,23 @@ func (e *Engine) SetUserSecretVersion(spec json.RawMessage, name string, version
 	return json.Marshal(s)
 }
 
+// SetUserCSR implements engine.UserManager: certificate renewal replaces the request, and the cell signs it.
+func (e *Engine) SetUserCSR(spec json.RawMessage, name, csr string) (json.RawMessage, error) {
+	s, err := parseSpecJSON(spec)
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(s.Users, func(u User) bool { return u.Name == name })
+	if i < 0 || !s.Users[i].isTLS() {
+		return nil, notFoundUser(name)
+	}
+	if err := validateCSR(csr); err != nil {
+		return nil, engine.Invalid("%v", err)
+	}
+	s.Users[i].CSR = csr
+	return json.Marshal(s)
+}
+
 // ListUsers implements engine.UserManager.
 func (e *Engine) ListUsers(spec json.RawMessage) (json.RawMessage, error) {
 	s, err := parseSpecJSON(spec)
@@ -211,6 +301,7 @@ func (e *Engine) ListUsers(spec json.RawMessage) (json.RawMessage, error) {
 	type view struct {
 		Name      string `json:"name"`
 		Mechanism string `json:"mechanism"`
+		Principal string `json:"principal"`
 		Admin     bool   `json:"admin"`
 		ACLs      []ACL  `json:"acls"`
 	}
@@ -220,7 +311,11 @@ func (e *Engine) ListUsers(spec json.RawMessage) (json.RawMessage, error) {
 		if acls == nil {
 			acls = []ACL{}
 		}
-		out = append(out, view{Name: u.Name, Mechanism: "SCRAM-SHA-512", Admin: u.Admin, ACLs: acls})
+		mech := "SCRAM-SHA-512"
+		if u.isTLS() {
+			mech = "mTLS"
+		}
+		out = append(out, view{Name: u.Name, Mechanism: mech, Principal: "User:" + u.principalName(), Admin: u.Admin, ACLs: acls})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return json.Marshal(out)
@@ -240,8 +335,9 @@ func parseSpecJSON(spec json.RawMessage) (Spec, error) {
 
 func userSecretName(user string) string { return "user-" + user }
 
-// renderUsers returns the KafkaUser objects and the secrets they need.
-func renderUsers(clusterID, cell string, s Spec, common map[string]any) (objs []map[string]any, mats []engine.SecretMaterial) {
+// renderUsers returns the KafkaUser objects, the secrets they need (SCRAM passwords) and the certificate
+// requests the cell must sign (tls users).
+func renderUsers(clusterID, cell string, s Spec, common map[string]any) (objs []map[string]any, mats []engine.SecretMaterial, certs []engine.CertRequest) {
 	users := slices.Clone(s.Users)
 	sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
 	for _, u := range users {
@@ -265,6 +361,28 @@ func renderUsers(clusterID, cell string, s Spec, common map[string]any) (objs []
 				ops[i] = op
 			}
 			aclObjs = append(aclObjs, map[string]any{"resource": res, "operations": ops})
+		}
+		if u.isTLS() {
+			// tls-external: the User Operator only creates the ACLs; the certificate is issued by the cell agent
+			// from the tenant's CSR, with CN=<name>, signed by the cluster's clients CA.
+			objs = append(objs, map[string]any{
+				"apiVersion": "kafka.strimzi.io/v1",
+				"kind":       "KafkaUser",
+				"metadata": map[string]any{
+					"name": u.Name, "namespace": clusterID,
+					"labels": merge(common, map[string]any{"strimzi.io/cluster": clusterID}),
+				},
+				"spec": map[string]any{
+					"authentication": map[string]any{"type": "tls-external"},
+					"authorization":  map[string]any{"type": "simple", "acls": aclObjs},
+				},
+			})
+			certs = append(certs, engine.CertRequest{
+				Name: u.Name, Namespace: clusterID, CommonName: u.Name, CSR: u.CSR,
+				CACertSecret: clusterID + "-clients-ca-cert", CACertKey: "ca.crt",
+				CAKeySecret: clusterID + "-clients-ca", CAKeyKey: "ca.key", ValidDays: 90,
+			})
+			continue
 		}
 		secretName := userSecretName(u.Name)
 		objs = append(objs, map[string]any{
@@ -290,5 +408,5 @@ func renderUsers(clusterID, cell string, s Spec, common map[string]any) (objs []
 			Data: map[string]secrets.Ref{"password": {Path: secrets.UserPath(cell, clusterID, u.Name), Key: "password", Version: u.SecretVersion}},
 		})
 	}
-	return objs, mats
+	return objs, mats, certs
 }

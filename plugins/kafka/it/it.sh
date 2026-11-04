@@ -52,7 +52,7 @@ docker rm -f "$NAME" >/dev/null 2>&1
 docker run -d --name "$NAME" --network host -v "$TMP:/it:ro" -v "$JAR:/opt/kafka/libs/streamcell-kafka-plugins.jar:ro" \
   --entrypoint bash "$KAFKA_IMAGE" -c '
     cp /it/server.properties /tmp/server.properties &&
-    /opt/kafka/bin/kafka-storage.sh format -t "$(/opt/kafka/bin/kafka-storage.sh random-uuid)" -c /tmp/server.properties --standalone &&
+    /opt/kafka/bin/kafka-storage.sh format -t "$(/opt/kafka/bin/kafka-storage.sh random-uuid)" -c /tmp/server.properties &&
     exec /opt/kafka/bin/kafka-server-start.sh /tmp/server.properties' >/dev/null
 
 K() { docker exec -i "$NAME" /opt/kafka/bin/"$1".sh "${@:2}"; }

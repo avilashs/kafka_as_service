@@ -169,6 +169,25 @@ type Output struct {
 	Key        string `json:"key"`
 }
 
+// CertOutputPrefix prefixes the Observed.Outputs name under which the agent reports a signed certificate.
+const CertOutputPrefix = "cert."
+
+// CertRequest asks the cell agent to sign a client certificate for a public key the tenant holds. The
+// private key never reaches the platform. The agent, not the requester, decides the subject: it is
+// CommonName, whatever the CSR says, so a tenant cannot ask for another principal's name. The CA key
+// stays in the cell, where the engine's operator keeps it.
+type CertRequest struct {
+	Name         string `json:"name"`       // result is reported as Outputs[CertOutputPrefix+Name]
+	Namespace    string `json:"namespace"`  // where the CA secrets live
+	CommonName   string `json:"commonName"` // subject CN of the issued certificate
+	CSR          string `json:"csr"`        // PEM PKCS#10; only its public key is used
+	CACertSecret string `json:"caCertSecret"`
+	CACertKey    string `json:"caCertKey"`
+	CAKeySecret  string `json:"caKeySecret"`
+	CAKeyKey     string `json:"caKeyKey"`
+	ValidDays    int    `json:"validDays"`
+}
+
 // Bundle is the complete rendered desired state of one resource in one cell.
 // Objects are applied in slice order and deleted in reverse order.
 type Bundle struct {
@@ -178,6 +197,9 @@ type Bundle struct {
 	Secrets []SecretMaterial `json:"secrets,omitempty"`
 	// Outputs are public values the agent reports back in Observed.Outputs.
 	Outputs []Output `json:"outputs,omitempty"`
+	// CertRequests are signed by the agent once the CA exists (the operator creates it after the first
+	// reconcile), and reported as outputs.
+	CertRequests []CertRequest `json:"certRequests,omitempty"`
 	// NodePools are provisioned before Objects are applied and released, after all
 	// pods are gone, when the resource is deleted.
 	NodePools []NodePoolSpec `json:"nodePools,omitempty"`
@@ -269,6 +291,8 @@ type UserManager interface {
 	RotateUser(spec json.RawMessage, name string) (json.RawMessage, error)
 	// SetUserSecretVersion records which secret version the user's rendered state refers to.
 	SetUserSecretVersion(spec json.RawMessage, name string, version int) (json.RawMessage, error)
+	// SetUserCSR replaces the certificate request of a certificate-authenticated user (renewal).
+	SetUserCSR(spec json.RawMessage, name, csr string) (json.RawMessage, error)
 	// ListUsers returns the public view of the users (never credentials).
 	ListUsers(spec json.RawMessage) (json.RawMessage, error)
 }

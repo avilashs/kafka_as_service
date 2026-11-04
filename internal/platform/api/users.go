@@ -60,44 +60,123 @@ func (s *Server) mutateError(w http.ResponseWriter, err error) bool {
 	return s.storeErr(w, err)
 }
 
-func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, tenant string) {
-	c, um, ok := s.userManager(w, r, tenant)
-	if !ok {
-		return
+const (
+	mechSCRAM = "SCRAM-SHA-512"
+	mechMTLS  = "mTLS"
+)
+
+// listUsers lists the users of one mechanism.
+func (s *Server) listUsers(mech string) handler {
+	return func(w http.ResponseWriter, r *http.Request, tenant string) {
+		c, um, ok := s.userManager(w, r, tenant)
+		if !ok {
+			return
+		}
+		raw, err := um.ListUsers(c.Spec)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			return
+		}
+		var all []map[string]any
+		_ = json.Unmarshal(raw, &all)
+		users := []map[string]any{}
+		for _, u := range all {
+			if u["mechanism"] == mech {
+				users = append(users, u)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"users": users})
 	}
-	users, err := um.ListUsers(c.Spec)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": json.RawMessage(users)})
 }
 
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request, tenant string) {
-	key, ok := idempotencyKey(w, r)
-	if !ok {
-		return
+// userMechanism returns the mechanism of an existing user, or "".
+func userMechanism(um engine.UserManager, spec json.RawMessage, name string) string {
+	raw, err := um.ListUsers(spec)
+	if err != nil {
+		return ""
 	}
-	_, um, ok := s.userManager(w, r, tenant)
-	if !ok {
-		return
+	var us []struct {
+		Name      string `json:"name"`
+		Mechanism string `json:"mechanism"`
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	_ = json.Unmarshal(raw, &us)
+	for _, u := range us {
+		if u.Name == name {
+			return u.Mechanism
+		}
+	}
+	return ""
+}
+
+// requireMechanism answers 404 unless the named user exists with that mechanism.
+func (s *Server) requireMechanism(w http.ResponseWriter, um engine.UserManager, spec json.RawMessage, name, mech string) bool {
+	if userMechanism(um, spec, name) != mech {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "user "+name+" not found")
+		return false
+	}
+	return true
+}
+
+// userBody reads the request body as a JSON object and sets the mechanism the endpoint stands for. A
+// client can not choose the mechanism (nor smuggle a certificate request into a SCRAM user).
+func userBody(w http.ResponseWriter, r *http.Request, mech string) (json.RawMessage, bool) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
+		return nil, false
 	}
-	// Mutate runs inside the transaction, after the idempotency lookup and before anything is written,
-	// so an invalid request creates no operation and a replay of a valid one is still a replay.
-	var named struct {
-		Name string `json:"name"`
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "the body must be a JSON object")
+		return nil, false
 	}
-	_ = json.Unmarshal(body, &named)
-	s.update(w, r, tenant, key, "CreateScramUser", updateRequest{Action: "user.create", User: named.Name, Body: compactJSON(body)},
-		func(c *store.Cluster) (json.RawMessage, error) {
-			spec, _, err := um.AddUser(c.Spec, body)
-			return spec, err
-		})
+	for _, k := range []string{"auth", "secretVersion"} {
+		if _, ok := m[k]; ok {
+			writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unknown field \""+k+"\"")
+			return nil, false
+		}
+	}
+	if mech == mechMTLS {
+		m["auth"] = json.RawMessage(`"tls"`)
+	} else if _, ok := m["csr"]; ok {
+		writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unknown field \"csr\" (certificate users are created at /mtls-users)")
+		return nil, false
+	}
+	out, _ := json.Marshal(m)
+	return out, true
+}
+
+func (s *Server) createUser(mech string) handler {
+	opType, action := "CreateScramUser", "user.create"
+	if mech == mechMTLS {
+		opType, action = "CreateMtlsUser", "mtls.create"
+	}
+	return func(w http.ResponseWriter, r *http.Request, tenant string) {
+		key, ok := idempotencyKey(w, r)
+		if !ok {
+			return
+		}
+		_, um, ok := s.userManager(w, r, tenant)
+		if !ok {
+			return
+		}
+		body, ok := userBody(w, r, mech)
+		if !ok {
+			return
+		}
+		// Mutate runs inside the transaction, after the idempotency lookup and before anything is written,
+		// so an invalid request creates no operation and a replay of a valid one is still a replay.
+		var named struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(body, &named)
+		// The stored operation request keeps no certificate request: the spec has it already.
+		s.update(w, r, tenant, key, opType, updateRequest{Action: action, User: named.Name},
+			func(c *store.Cluster) (json.RawMessage, error) {
+				spec, _, err := um.AddUser(c.Spec, body)
+				return spec, err
+			})
+	}
 }
 
 func (s *Server) rotateUser(w http.ResponseWriter, r *http.Request, tenant string) {
@@ -105,27 +184,94 @@ func (s *Server) rotateUser(w http.ResponseWriter, r *http.Request, tenant strin
 	if !ok {
 		return
 	}
-	_, um, ok := s.userManager(w, r, tenant)
+	c, um, ok := s.userManager(w, r, tenant)
 	if !ok {
 		return
 	}
 	name := r.PathValue("name")
+	if !s.requireMechanism(w, um, c.Spec, name, mechSCRAM) {
+		return
+	}
 	s.update(w, r, tenant, key, "RotateScramUser", updateRequest{Action: "user.rotate", User: name},
 		func(c *store.Cluster) (json.RawMessage, error) { return um.RotateUser(c.Spec, name) })
 }
 
-func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, tenant string) {
+// renewCertificate replaces a certificate user's request; the cell signs the new one.
+func (s *Server) renewCertificate(w http.ResponseWriter, r *http.Request, tenant string) {
 	key, ok := idempotencyKey(w, r)
 	if !ok {
 		return
 	}
-	_, um, ok := s.userManager(w, r, tenant)
+	c, um, ok := s.userManager(w, r, tenant)
 	if !ok {
 		return
 	}
 	name := r.PathValue("name")
-	s.update(w, r, tenant, key, "DeleteScramUser", updateRequest{Action: "user.delete", User: name},
-		func(c *store.Cluster) (json.RawMessage, error) { return um.RemoveUser(c.Spec, name) })
+	if !s.requireMechanism(w, um, c.Spec, name, mechMTLS) {
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	var req struct {
+		CSR string `json:"csr"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err != nil || dec.Decode(&req) != nil || req.CSR == "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", `the body must be {"csr": "<PEM>"}`)
+		return
+	}
+	s.update(w, r, tenant, key, "RenewMtlsCertificate", updateRequest{Action: "mtls.renew", User: name},
+		func(c *store.Cluster) (json.RawMessage, error) { return um.SetUserCSR(c.Spec, name, req.CSR) })
+}
+
+// mtlsCertificate returns the certificate the cell issued for a certificate user.
+func (s *Server) mtlsCertificate(w http.ResponseWriter, r *http.Request, tenant string) {
+	c, um, ok := s.userManager(w, r, tenant)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if !s.requireMechanism(w, um, c.Spec, name, mechMTLS) {
+		return
+	}
+	obs, err := s.Store.GetObserved(r.Context(), c.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusConflict, "NOT_READY", "the certificate has not been issued yet")
+		return
+	}
+	if s.storeErr(w, err) {
+		return
+	}
+	pem := strings.TrimSpace(obs.Observed.Outputs[engine.CertOutputPrefix+name])
+	if pem == "" {
+		writeErr(w, http.StatusConflict, "NOT_READY", "the certificate has not been issued yet")
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	_, _ = io.WriteString(w, pem+"\n")
+}
+
+func (s *Server) deleteUser(mech string) handler {
+	opType, action := "DeleteScramUser", "user.delete"
+	if mech == mechMTLS {
+		opType, action = "DeleteMtlsUser", "mtls.delete"
+	}
+	return func(w http.ResponseWriter, r *http.Request, tenant string) {
+		key, ok := idempotencyKey(w, r)
+		if !ok {
+			return
+		}
+		c, um, ok := s.userManager(w, r, tenant)
+		if !ok {
+			return
+		}
+		name := r.PathValue("name")
+		if !s.requireMechanism(w, um, c.Spec, name, mech) {
+			return
+		}
+		s.update(w, r, tenant, key, opType, updateRequest{Action: action, User: name},
+			func(c *store.Cluster) (json.RawMessage, error) { return um.RemoveUser(c.Spec, name) })
+	}
 }
 
 func (s *Server) update(w http.ResponseWriter, r *http.Request, tenant, key, opType string, req updateRequest, mutate func(*store.Cluster) (json.RawMessage, error)) {
@@ -153,8 +299,7 @@ func (s *Server) userCredentials(w http.ResponseWriter, r *http.Request, tenant 
 		return
 	}
 	name := r.PathValue("name")
-	if !userExists(um, c.Spec, name) {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "user "+name+" not found")
+	if !s.requireMechanism(w, um, c.Spec, name, mechSCRAM) {
 		return
 	}
 	if c.CellID == nil || s.Secrets == nil {
@@ -175,23 +320,6 @@ func (s *Server) userCredentials(w http.ResponseWriter, r *http.Request, tenant 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": name, "password": data["password"], "mechanism": "SCRAM-SHA-512", "secretVersion": version,
 	})
-}
-
-func userExists(um engine.UserManager, spec json.RawMessage, name string) bool {
-	raw, err := um.ListUsers(spec)
-	if err != nil {
-		return false
-	}
-	var us []struct {
-		Name string `json:"name"`
-	}
-	_ = json.Unmarshal(raw, &us)
-	for _, u := range us {
-		if u.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 // caCertificate returns the PEM CA certificate clients must trust for this cluster. Every cluster has

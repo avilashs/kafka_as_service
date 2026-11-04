@@ -39,6 +39,9 @@ public class PlatformAuthorizer extends StandardAuthorizer {
     /** Resource name prefix reserved for the platform (internal topics, canary, ...). */
     public static final String RESERVED_PREFIX = "__";
 
+    /** What the platform accepts as a user name (the same rule the API applies). */
+    private static final java.util.regex.Pattern TENANT_NAME = java.util.regex.Pattern.compile("^[a-z][a-z0-9-]{0,30}[a-z0-9]$");
+
     private Set<String> superUsers = Set.of();
 
     @Override
@@ -175,8 +178,12 @@ public class PlatformAuthorizer extends StandardAuthorizer {
         if (!principal.startsWith("User:")) {
             return "only User: principals are supported";
         }
-        if (superUsers.contains(principal) || principal.substring("User:".length()).startsWith("platform")
-                || principal.contains("=")) {
+        // Tenant principals are SCRAM users ("User:name"), certificate users ("User:CN=name") and the wildcard.
+        // Anything else, in particular the platform's own certificates and the brokers, is refused.
+        String who = principal.substring("User:".length());
+        String name = who.startsWith("CN=") ? who.substring(3) : who;
+        boolean tenantName = TENANT_NAME.matcher(name).matches() && !name.startsWith("platform") && !name.startsWith("kc-");
+        if (superUsers.contains(principal) || !("*".equals(who) || tenantName)) {
             return "ACLs for platform principals cannot be created";
         }
         if (!"*".equals(b.entry().host())) {

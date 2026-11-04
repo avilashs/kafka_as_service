@@ -200,6 +200,106 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/mtls-users:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+    get:
+      operationId: listMtlsUsers
+      summary: List certificate-authenticated users
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: '#/components/schemas/MtlsUser' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createMtlsUser
+      summary: Create a certificate-authenticated user
+      description: |
+        Generate a key pair and a PKCS#10 request on your side and send only the request: the private key never
+        leaves you. The cluster's clients CA signs a client certificate for the request's public key with
+        subject `CN=<name>` (the subject in your request is ignored). Read the certificate with
+        `GET .../mtls-users/{name}/certificate` once the operation has succeeded. Connect to the
+        `mtls` bootstrap endpoint (`GET /bootstrap-brokers`) with that certificate and trust the cluster CA.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateMtlsUserRequest' }
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/mtls-users/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+      - $ref: '#/components/parameters/UserName'
+    delete:
+      operationId: deleteMtlsUser
+      summary: Delete a certificate-authenticated user
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/mtls-users/{name}/renew:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+      - $ref: '#/components/parameters/UserName'
+    post:
+      operationId: renewMtlsCertificate
+      summary: Have a new certificate signed for a new request
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [csr]
+              properties:
+                csr: { type: string, description: PEM PKCS#10 certificate request }
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/mtls-users/{name}/certificate:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+      - $ref: '#/components/parameters/UserName'
+    get:
+      operationId: getMtlsCertificate
+      summary: The client certificate issued for the user
+      responses:
+        '200':
+          description: PEM certificate (public)
+          content:
+            application/x-pem-file:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
   /v1/operations/{id}:
     parameters:
       - name: id
@@ -337,11 +437,35 @@ components:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/ACL' }
-    ScramUser:
+    CreateMtlsUserRequest:
       type: object
-      required: [name, mechanism, admin, acls]
+      additionalProperties: false
+      required: [name, csr]
+      properties:
+        name: { type: string, pattern: '^[a-z][a-z0-9-]{0,30}[a-z0-9]$', description: 'Names starting with "platform" or "kc-" are reserved. The Kafka principal is `User:CN=<name>`.' }
+        csr: { type: string, description: 'PEM PKCS#10 request; RSA 2048-4096 or ECDSA P-256/P-384' }
+        admin: { type: boolean }
+        acls:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/ACL' }
+    MtlsUser:
+      type: object
+      required: [name, mechanism, principal, admin, acls]
       properties:
         name: { type: string }
+        mechanism: { type: string, enum: [mTLS] }
+        principal: { type: string, example: 'User:CN=service-1' }
+        admin: { type: boolean }
+        acls:
+          type: array
+          items: { $ref: '#/components/schemas/ACL' }
+    ScramUser:
+      type: object
+      required: [name, mechanism, principal, admin, acls]
+      properties:
+        name: { type: string }
+        principal: { type: string }
         mechanism: { type: string, enum: [SCRAM-SHA-512] }
         admin: { type: boolean }
         acls:
@@ -361,7 +485,7 @@ components:
       properties:
         id: { type: string }
         clusterId: { type: string }
-        type: { type: string, enum: [CreateCluster, DeleteCluster, CreateScramUser, RotateScramUser, DeleteScramUser] }
+        type: { type: string, enum: [CreateCluster, DeleteCluster, CreateScramUser, RotateScramUser, DeleteScramUser, CreateMtlsUser, RenewMtlsCertificate, DeleteMtlsUser] }
         state: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
         step: { type: string }
         error:

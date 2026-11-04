@@ -4,7 +4,12 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"net/http"
@@ -359,4 +364,165 @@ func TestM3ClusterCA(t *testing.T) {
 	if !ca.IsCA || !cb.IsCA || ca.Equal(cb) || string(ca.RawSubjectPublicKeyInfo) == string(cb.RawSubjectPublicKeyInfo) {
 		t.Error("clusters must not share a CA")
 	}
+}
+
+// csrFor builds a PEM PKCS#10 request with a fresh ECDSA key; the subject is deliberately hostile.
+func csrFor(t *testing.T, subject string) (csrPEM string, pub *ecdsa.PublicKey) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: subject}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), &key.PublicKey
+}
+
+// Certificate users: the cell signs the tenant's CSR with the cluster's clients CA; the subject is decided
+// by the platform; the private key is never seen.
+func TestM3MutualTLSUsers(t *testing.T) {
+	e := newEnv(t)
+	e.startWorker()
+	id := e.activeCluster("mtlsc")
+	base := "/v1/clusters/" + id + "/mtls-users"
+	ctx := context.Background()
+
+	csr, pub := csrFor(t, "kc-"+strings.TrimPrefix(id, "kc-")+"-entity-user-operator") // asks to be a platform principal
+	e.mustUserOp("POST", base, map[string]any{"name": "svc-one", "csr": csr, "admin": true})
+
+	r := e.call("GET", base+"/svc-one/certificate", "", nil)
+	if r.Code != 200 {
+		t.Fatalf("certificate: %d %s", r.Code, r.Raw)
+	}
+	blk, _ := pem.Decode([]byte(r.Raw))
+	cert, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert.Subject.CommonName != "svc-one" || len(cert.Subject.Organization) != 0 {
+		t.Errorf("subject = %v; the platform must decide it, not the CSR", cert.Subject)
+	}
+	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(pub) {
+		t.Error("certificate is for another public key")
+	}
+	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageClientAuth || cert.IsCA {
+		t.Errorf("usage = %v ca=%v", cert.ExtKeyUsage, cert.IsCA)
+	}
+	ca, err := kube.CoreV1().Secrets(id).Get(ctx, id+"-clients-ca-cert", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb, _ := pem.Decode(ca.Data["ca.crt"])
+	caCert, _ := x509.ParseCertificate(cb.Bytes)
+	if err := cert.CheckSignatureFrom(caCert); err != nil {
+		t.Errorf("not signed by the clients CA: %v", err)
+	}
+	// not signed by the cluster (server) CA
+	scert, _ := kube.CoreV1().Secrets(id).Get(ctx, id+"-cluster-ca-cert", metav1.GetOptions{})
+	sb, _ := pem.Decode(scert.Data["ca.crt"])
+	serverCA, _ := x509.ParseCertificate(sb.Bytes)
+	if cert.CheckSignatureFrom(serverCA) == nil {
+		t.Error("client certificate verifies against the server CA")
+	}
+
+	// KafkaUser is tls-external, principal CN=svc-one, no password secret exists.
+	ku, err := dyn.Resource(kafkaUserGVR).Namespace(id).Get(ctx, "svc-one", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ, _, _ := unstructured.NestedString(ku.Object, "spec", "authentication", "type"); typ != "tls-external" {
+		t.Errorf("authentication = %q", typ)
+	}
+	if _, err := kube.CoreV1().Secrets(id).Get(ctx, "user-svc-one", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("a certificate user must have no password secret (%v)", err)
+	}
+	if secretsSt != nil {
+		if _, _, err := secretsSt.Get(ctx, secrets.UserPath(e.cellID, id, "svc-one")); err != secrets.ErrNotFound {
+			t.Errorf("a certificate user must have no stored secret (%v)", err)
+		}
+	}
+	// the Kafka CR has the separate mtls listener
+	k, _ := dyn.Resource(kafkaGVR).Namespace(id).Get(ctx, id, metav1.GetOptions{})
+	ls, _, _ := unstructured.NestedSlice(k.Object, "spec", "kafka", "listeners")
+	found := false
+	for _, l := range ls {
+		m := l.(map[string]any)
+		if m["name"] == "mtls" {
+			found = true
+			if m["port"] != int64(9095) || m["authentication"].(map[string]any)["type"] != "tls" {
+				t.Errorf("mtls listener = %v", m)
+			}
+		}
+	}
+	if !found {
+		t.Error("no mtls listener")
+	}
+
+	// Mechanisms stay apart.
+	if l := e.call("GET", "/v1/clusters/"+id+"/scram-users", "", nil); strings.Contains(l.Raw, "svc-one") {
+		t.Errorf("certificate user listed as SCRAM: %s", l.Raw)
+	}
+	if _, code := e.credentials(id, "svc-one"); code != http.StatusNotFound {
+		t.Errorf("credentials of a certificate user: %d", code)
+	}
+	if rr := e.userOp("POST", "/v1/clusters/"+id+"/scram-users/svc-one/rotate", nil); rr.Code != http.StatusNotFound {
+		t.Errorf("rotate on a certificate user: %d", rr.Code)
+	}
+	if rr := e.userOp("POST", "/v1/clusters/"+id+"/scram-users", map[string]any{"name": "sneaky", "csr": csr}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("csr on a SCRAM user: %d", rr.Code)
+	}
+	if rr := e.userOp("POST", base, map[string]any{"name": "sneaky2", "csr": csr, "auth": "scram"}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("client-chosen auth: %d", rr.Code)
+	}
+
+	// Bad requests.
+	for name, body := range map[string]map[string]any{
+		"reserved cluster-id prefix": {"name": "kc-0123456789-cruise-control", "csr": csr},
+		"platform prefix":            {"name": "platform-x", "csr": csr},
+		"no csr":                     {"name": "nocsr"},
+		"garbage csr":                {"name": "garbage", "csr": "-----BEGIN CERTIFICATE REQUEST-----\nAAAA\n-----END CERTIFICATE REQUEST-----"},
+	} {
+		if rr := e.userOp("POST", base, body); rr.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: %d %v", name, rr.Code, rr.Body)
+		}
+	}
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 1024)
+	der, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, rsaKey)
+	weak := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+	if rr := e.userOp("POST", base, map[string]any{"name": "weak", "csr": weak}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("1024-bit RSA: %d", rr.Code)
+	}
+
+	// Renewal: new request, new certificate for the new key, same user.
+	csr2, pub2 := csrFor(t, "whoever")
+	e.mustUserOp("POST", base+"/svc-one/renew", map[string]any{"csr": csr2})
+	r2 := e.call("GET", base+"/svc-one/certificate", "", nil)
+	b2, _ := pem.Decode([]byte(r2.Raw))
+	c2, _ := x509.ParseCertificate(b2.Bytes)
+	if !c2.PublicKey.(*ecdsa.PublicKey).Equal(pub2) || c2.Subject.CommonName != "svc-one" {
+		t.Error("renewed certificate does not match the new request")
+	}
+	// The stored certificate is stable: no new signing without a change.
+	time.Sleep(1500 * time.Millisecond)
+	r3 := e.call("GET", base+"/svc-one/certificate", "", nil)
+	if r3.Raw != r2.Raw {
+		t.Error("certificate changed without a request change")
+	}
+
+	// Tenant scoping.
+	other := e.otherTenant()
+	for _, p := range []string{"/mtls-users", "/mtls-users/svc-one/certificate"} {
+		if rr := e.callAs(other, "GET", "/v1/clusters/"+id+p, "", nil); rr.Code != http.StatusNotFound {
+			t.Errorf("other tenant GET %s: %d", p, rr.Code)
+		}
+	}
+
+	// Delete.
+	e.mustUserOp("DELETE", base+"/svc-one", nil)
+	if rr := e.call("GET", base+"/svc-one/certificate", "", nil); rr.Code != http.StatusNotFound {
+		t.Errorf("certificate of deleted user: %d", rr.Code)
+	}
+	waitFor(t, "KafkaUser removed", 10*time.Second, func() bool {
+		_, err := dyn.Resource(kafkaUserGVR).Namespace(id).Get(ctx, "svc-one", metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	})
 }

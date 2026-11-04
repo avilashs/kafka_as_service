@@ -719,6 +719,12 @@ func (a *Agent) reportStatus(ctx context.Context) {
 				obs.Objects = append(obs.Objects, a.observe(ctx, r))
 			}
 			obs.Outputs = a.readOutputs(ctx, s.cs.bundle)
+			for k, v := range a.certOutputs(ctx, s.cs.bundle) {
+				if obs.Outputs == nil {
+					obs.Outputs = map[string]string{}
+				}
+				obs.Outputs[k] = v
+			}
 		}
 		reports = append(reports, store.StatusReport{ClusterID: s.id, Observed: obs})
 	}

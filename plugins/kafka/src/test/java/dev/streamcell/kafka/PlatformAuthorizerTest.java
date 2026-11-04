@@ -110,6 +110,12 @@ class PlatformAuthorizerTest {
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:CN=kc-1-entity-user-operator", "*", AclOperation.READ)));
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:platform-canary", "*", AclOperation.READ)));
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "Group:x", "*", AclOperation.READ)));
+        // certificate users: tenant-named ones are fine, anything that could be a platform certificate is not
+        assertNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:CN=service-1", "*", AclOperation.READ)));
+        assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:CN=kc-0123456789-cruise-control", "*", AclOperation.READ)));
+        assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:CN=kc-0123456789-kafka,O=io.strimzi", "*", AclOperation.READ)));
+        assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:CN=x,O=y", "*", AclOperation.READ)));
+        assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:ANONYMOUS", "*", AclOperation.READ)));
         // host restrictions are meaningless behind the gateway
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:app", "10.0.0.1", AclOperation.READ)));
     }

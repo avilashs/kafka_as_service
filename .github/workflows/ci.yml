@@ -70,6 +70,14 @@ jobs:
           kubectl get kafka,kafkanodepool -A -o yaml || true
           kubectl get tlsroute,gateway -A -o yaml | head -200 || true
           kubectl get kafkauser -A -o yaml | head -200 || true
+          for ns in $(kubectl get ns -l streamcell.dev/inventory -o name | cut -d/ -f2); do
+            echo "=== $ns: pods"; kubectl -n "$ns" get pods -o wide || true
+            echo "=== $ns: cruise-control logs"; kubectl -n "$ns" logs deploy/$ns-cruise-control --tail=150 || true
+            echo "=== $ns: cruise-control previous logs"; kubectl -n "$ns" logs deploy/$ns-cruise-control --previous --tail=150 || true
+            echo "=== $ns: cruise-control describe"; kubectl -n "$ns" describe pod -l strimzi.io/name=$ns-cruise-control | tail -40 || true
+            echo "=== $ns: broker-0 ERROR/WARN/authorizer lines"; kubectl -n "$ns" logs $ns-brokers-0 --tail=2000 | grep -iE "ERROR|WARN|authoriz|denied|policy" | tail -60 || true
+            echo "=== $ns: controller ERROR lines"; kubectl -n "$ns" logs $ns-controllers-3 --tail=2000 | grep -iE "ERROR|authoriz|denied|policy" | tail -30 || true
+          done
           kubectl get networkpolicy -A || true
           kubectl -n envoy-gateway-system get svc,pods -o wide || true
           kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=100 || true

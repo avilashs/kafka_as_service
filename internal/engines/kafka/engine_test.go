@@ -412,7 +412,7 @@ func TestListenersRestrictNetworkPeers(t *testing.T) {
 		t.Fatal("no Kafka")
 	}
 	ls, _, _ := unstructured.NestedSlice(k.Object, "spec", "kafka", "listeners")
-	if len(ls) != 2 {
+	if len(ls) != 3 {
 		t.Fatalf("listeners = %d", len(ls))
 	}
 	for _, l := range ls {
@@ -423,7 +423,7 @@ func TestListenersRestrictNetworkPeers(t *testing.T) {
 		}
 		p := peers[0].(map[string]any)
 		switch m["name"] {
-		case "external":
+		case "external", "mtls":
 			ns := p["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]any)["kubernetes.io/metadata.name"]
 			if ns != "envoy-gateway-system" {
 				t.Errorf("external listener peer namespace = %v, want the gateway data-plane namespace", ns)

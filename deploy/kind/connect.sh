@@ -7,6 +7,7 @@
 # check failed. A check that cannot be run says SKIP with the reason, never PASS.
 
 KAFKA_IMAGE="${KAFKA_IMAGE:-quay.io/strimzi/kafka:1.3.0-kafka-4.3.1}"
+TENANT_TOKEN="${TENANT_TOKEN:-dev-tenant-token}"
 API_B_TOKEN="${TENANT_B_TOKEN:-dev-tenant-b-token}"
 CONNECT_FAILED=0
 declare -a CONNECT_RESULTS=()
@@ -70,8 +71,8 @@ set_hosts() { # cluster ids: every name the clients will resolve is the local re
   local cid h
   for cid in "$@"; do
     h="$cid.$(kubectl get kafka -n "$cid" "$cid" -o jsonpath='{.spec.kafka.listeners[?(@.name=="external")].configuration.bootstrap.host}' | cut -d. -f3-)"
-    HOSTS+=(--add-host "bootstrap.$h:127.0.0.1")
-    for i in $(seq 0 12); do HOSTS+=(--add-host "b$i.$h:127.0.0.1"); done
+    HOSTS+=(--add-host "bootstrap.$h:127.0.0.1" --add-host "mtls-bootstrap.$h:127.0.0.1")
+    for i in $(seq 0 12); do HOSTS+=(--add-host "b$i.$h:127.0.0.1" --add-host "m$i.$h:127.0.0.1"); done
   done
 }
 
@@ -220,6 +221,22 @@ scenario_connect() {
   check_denied "tenant admin cannot alter broker configuration" "not authorized|authorization|denied" \
     kafka kafka-configs --bootstrap-server "$boot_a" --command-config "$adm" --alter --entity-type brokers --entity-default --add-config log.retention.ms=1000
 
+  echo "== tenants manage ACLs through the Kafka Admin API (PlatformAuthorizer)"
+  expect_ok "admin: grant reader Read on private-1 with kafka-acls (CreateAcls over the public endpoint)" \
+    kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --add --allow-principal User:reader --operation Read --operation Describe --topic private-1
+  expect_ok "admin: list ACLs (DescribeAcls)" kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --list --topic private-1
+  echo "y" | produce "$adm" private-1 "$boot_a" >/dev/null 2>&1 || true
+  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic private-1 --group grp-3 --from-beginning --max-messages 1 --timeout-ms 60000 2>/dev/null | wc -l || true)
+  [[ "$got" == 1 ]] && record PASS "reader reads private-1 once the tenant admin granted it" || record FAIL "reader could not read private-1 after the grant (got $got)"
+  check_denied "admin cannot grant cluster-level Alter" "authoriz|platform|denied" \
+    kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --add --allow-principal User:reader --cluster --operation Alter
+  check_denied "admin cannot create a reserved topic" "authoriz|denied" \
+    kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --topic __sneaky --partitions 1 --replication-factor 3
+  check_denied "admin cannot set a topic config outside the allowlist" "policy|cannot be set" \
+    kafka kafka-configs --bootstrap-server "$boot_a" --command-config "$adm" --alter --entity-type topics --entity-name orders-1 --add-config unclean.leader.election.enable=true
+  expect_ok "admin: allowed topic config change (retention.ms)" \
+    kafka kafka-configs --bootstrap-server "$boot_a" --command-config "$adm" --alter --entity-type topics --entity-name orders-1 --add-config retention.ms=3600000
+
   echo "== transactions and idempotence"
   kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --topic orders-tx --partitions 3 --replication-factor 3 >/dev/null 2>&1 || true
   expect_ok "admin: transactional producer commits 200 records (kafka-producer-perf-test, transactional.id)" \
@@ -237,6 +254,9 @@ scenario_connect() {
     kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$rd" --list
   rd=$(props "$TENANT_TOKEN" "$cida" reader)
   expect_ok "new reader password is accepted" kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$rd" --list
+
+  echo "== mutual TLS: the cell signs the tenant's CSR; the private key never leaves the client"
+  mtls_checks "$cida" "$cidb"
 
   echo "== tenant isolation: credentials and CA"
   # A's admin credentials, pointed at B's truststore (so TLS to B succeeds and only the credentials are tested)
@@ -320,4 +340,58 @@ network_isolation() {
     record SKIP "gateway proxy shell check: the Envoy image has no bash; the client flow above already proves this path"
   fi
   kubectl delete namespace "$probe" --wait=false >/dev/null 2>&1 || true
+}
+
+mtls_checks() {
+  local a=$1 b=$2 boot_m boot_mb
+  boot_m=$(api_as "$TENANT_TOKEN" GET "/v1/clusters/$a/bootstrap-brokers" | jq -r '.endpoints.mtls')
+  boot_mb=$(api_as "$API_B_TOKEN" GET "/v1/clusters/$b/bootstrap-brokers" | jq -r '.endpoints.mtls')
+  echo "  mTLS endpoints: A=$boot_m B=$boot_mb"
+  [[ "$boot_m" == mtls-bootstrap.*:443 ]] && record PASS "mTLS endpoint is separate from the SCRAM one (own host, port 443)" || record FAIL "mTLS endpoint (got $boot_m)"
+
+  # key and CSR are made here; only the CSR is sent. The subject asked for is hostile on purpose.
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$WORK/svc.key" 2>/dev/null
+  openssl req -new -key "$WORK/svc.key" -subj "/CN=kc-pretend-entity-user-operator/O=io.strimzi" -out "$WORK/svc.csr"
+  local body; body=$(jq -n --arg csr "$(cat "$WORK/svc.csr")" '{name:"svc1", csr:$csr, acls:[
+    {resource:{type:"topic",name:"orders",patternType:"prefix"},operations:["Read","Write","Describe"]},
+    {resource:{type:"group",name:"grp-",patternType:"prefix"},operations:["Read"]},
+    {resource:{type:"cluster"},operations:["IdempotentWrite"]}]}')
+  local op; op=$(api_as "$TENANT_TOKEN" POST "/v1/clusters/$a/mtls-users" "$body" | jq -r .id)
+  [[ -n "$op" && "$op" != null ]] || { record FAIL "create mTLS user request"; return; }
+  with_token "$TENANT_TOKEN" wait_op "$op" 600
+  api_as "$TENANT_TOKEN" GET "/v1/clusters/$a/mtls-users/svc1/certificate" >"$WORK/svc.crt" || { record FAIL "no certificate issued"; return; }
+  openssl x509 -in "$WORK/svc.crt" -noout -subject -issuer -dates -ext extendedKeyUsage | sed 's/^/  cert: /'
+  openssl x509 -in "$WORK/svc.crt" -noout -subject -nameopt RFC2253 | grep -qx 'subject=CN=svc1' && record PASS "issued subject is CN=svc1 (the CSR's subject was ignored)" || record FAIL "issued subject is not CN=svc1"
+  # the certificate is for our key, and chains to the cluster's clients CA (Strimzi writes it to <cluster>-clients-ca-cert)
+  [[ "$(openssl x509 -in "$WORK/svc.crt" -noout -pubkey)" == "$(openssl pkey -in "$WORK/svc.key" -pubout)" ]] && record PASS "certificate is for the tenant's own key" || record FAIL "certificate is for another key"
+  kubectl -n "$a" get secret "$a-clients-ca-cert" -o jsonpath='{.data.ca\.crt}' | base64 -d >"$WORK/clients-ca-$a.pem"
+  openssl verify -CAfile "$WORK/clients-ca-$a.pem" "$WORK/svc.crt" >/dev/null 2>&1 && record PASS "certificate verifies against A's clients CA" || record FAIL "certificate does not verify against A's clients CA"
+
+  # PEM keystore: private key (PKCS#8) followed by the certificate
+  cat "$WORK/svc.key" "$WORK/svc.crt" >"$WORK/svc-keystore.pem"
+  chmod 644 "$WORK"/*
+  cat >"$WORK/mtls-a.properties" <<PROPS
+security.protocol=SSL
+ssl.keystore.type=PEM
+ssl.keystore.location=/work/svc-keystore.pem
+ssl.truststore.type=PEM
+ssl.truststore.location=/work/ca-$a.pem
+request.timeout.ms=30000
+default.api.timeout.ms=60000
+PROPS
+  sed "s#/work/ca-$a.pem#/work/ca-$b.pem#" "$WORK/mtls-a.properties" >"$WORK/mtls-a-on-b.properties"
+  chmod 644 "$WORK"/*.properties
+
+  retry_ok "mTLS: list topics through the mTLS endpoint" 6 kafka kafka-topics --bootstrap-server "$boot_m" --command-config /work/mtls-a.properties --list
+  produce_mtls() { seq 1 20 | sed 's/^/mtls-/' | kafka kafka-console-producer --bootstrap-server "$boot_m" --producer.config /work/mtls-a.properties --topic orders-1; }
+  expect_ok "mTLS: produce 20 messages to orders-1 (ACL from the user's spec)" produce_mtls
+  local got
+  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_m" --consumer.config /work/mtls-a.properties --topic orders-1 --group grp-m --from-beginning --max-messages 20 --timeout-ms 60000 2>/dev/null | grep -c '^mtls-' || true)
+  [[ "$got" == 20 ]] && record PASS "mTLS: consume the 20 messages back" || record FAIL "mTLS: consumed $got of 20"
+  check_denied "mTLS user is held to its ACLs (cannot write private-1)" "not authorized|authorization" \
+    bash -c "echo x | docker run --rm -i --network host ${HOSTS[*]} -v $WORK:/work:ro --entrypoint /opt/kafka/bin/kafka-console-producer.sh $KAFKA_IMAGE --bootstrap-server $boot_m --producer.config /work/mtls-a.properties --topic private-1"
+  check_denied "no client certificate is refused on the mTLS port" "ssl|handshake|certificate|disconnected|bad_certificate|timed out" \
+    kafka kafka-topics --bootstrap-server "$boot_m" --command-config "/work/$a-admin1.properties" --list
+  check_denied "A's certificate is rejected by B's mTLS listener" "ssl|handshake|certificate|disconnected|bad_certificate|timed out" \
+    kafka kafka-topics --bootstrap-server "$boot_mb" --command-config /work/mtls-a-on-b.properties --list
 }

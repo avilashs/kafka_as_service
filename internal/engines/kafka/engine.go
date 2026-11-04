@@ -183,6 +183,14 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 			}
 		}
 	}
+	// A certificate-authenticated user is usable only once the cell has signed its certificate.
+	if sp, err := parseSpecJSON(rs.Spec); err == nil {
+		for _, u := range sp.Users {
+			if u.isTLS() && obs.Outputs[engine.CertOutputPrefix+u.Name] == "" {
+				return engine.Status{Reason: fmt.Sprintf("certificate of user %s not issued yet", u.Name)}, nil
+			}
+		}
+	}
 	var st struct {
 		ObservedGeneration int64 `json:"observedGeneration"`
 		Conditions         []struct {
@@ -205,8 +213,11 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 	}
 	vals := map[string]string{"KafkaVersion": st.KafkaVersion, "MetadataVersion": st.KafkaMetadataVersion}
 	for _, l := range st.Listeners {
-		if l.Name == "external" {
+		switch l.Name {
+		case "external":
 			vals["endpoint.scram-sha-512"] = l.BootstrapServers
+		case "mtls":
+			vals["endpoint.mtls"] = l.BootstrapServers
 		}
 	}
 	if st.ObservedGeneration < kafkaObj.Generation {

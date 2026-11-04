@@ -113,28 +113,38 @@ func (s *opSim) reconcileKafkas(ctx context.Context) {
 	}
 }
 
-// ensureClusterCA creates the CA certificate Secret Strimzi would create for the cluster.
+// ensureClusterCA creates the CA Secrets Strimzi would create for the cluster: the cluster CA certificate
+// (brokers' server certificates are signed by it) and the clients CA (certificate and key; the cell agent
+// signs client certificates with it).
 func (s *opSim) ensureClusterCA(ctx context.Context, ns string) {
-	name := ns + "-cluster-ca-cert"
-	if _, err := s.kube.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{}); err == nil {
-		return
+	create := func(name string, data map[string][]byte) {
+		if _, err := s.kube.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{}); err == nil {
+			return
+		}
+		_, _ = s.kube.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Data: data}, metav1.CreateOptions{})
 	}
-	_, _ = s.kube.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Data:       map[string][]byte{"ca.crt": []byte(testCA(ns))},
-	}, metav1.CreateOptions{})
+	crt, _ := testCA(ns + "-cluster-ca")
+	create(ns+"-cluster-ca-cert", map[string][]byte{"ca.crt": []byte(crt)})
+	if _, err := s.kube.CoreV1().Secrets(ns).Get(ctx, ns+"-clients-ca-cert", metav1.GetOptions{}); err != nil {
+		ccrt, ckey := testCA(ns + "-clients-ca")
+		create(ns+"-clients-ca-cert", map[string][]byte{"ca.crt": []byte(ccrt)})
+		create(ns+"-clients-ca", map[string][]byte{"ca.key": []byte(ckey), "ca.crt": []byte(ccrt)})
+	}
 }
 
-// testCA returns a fresh self-signed CA certificate in PEM form.
-func testCA(cn string) string {
+// testCA returns a fresh self-signed CA certificate and its PKCS#8 key, in PEM form.
+func testCA(cn string) (certPEM, keyPEM string) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn + "-cluster-ca"},
+		SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
 		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
 		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
 	}
 	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	kder, _ := x509.MarshalPKCS8PrivateKey(key)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kder}))
 }
 
 // reconcileUsers marks KafkaUser CRs Ready once the user secret they reference exists.
@@ -152,8 +162,10 @@ func (s *opSim) reconcileUsers(ctx context.Context) {
 			continue
 		}
 		secretName, _, _ := unstructured.NestedString(u.Object, "spec", "authentication", "password", "valueFrom", "secretKeyRef", "name")
-		if _, err := s.kube.CoreV1().Secrets(u.GetNamespace()).Get(ctx, secretName, metav1.GetOptions{}); err != nil {
-			continue // Strimzi reports NotReady until the referenced secret exists
+		if typ, _, _ := unstructured.NestedString(u.Object, "spec", "authentication", "type"); typ != "tls-external" {
+			if _, err := s.kube.CoreV1().Secrets(u.GetNamespace()).Get(ctx, secretName, metav1.GetOptions{}); err != nil {
+				continue // Strimzi reports NotReady until the referenced secret exists
+			}
 		}
 		u.Object["status"] = map[string]any{
 			"observedGeneration": u.GetGeneration(),
