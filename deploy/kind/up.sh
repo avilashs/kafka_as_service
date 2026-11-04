@@ -12,6 +12,7 @@ ENVOY_GATEWAY_VERSION="${ENVOY_GATEWAY_VERSION:-v1.9.3}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.34.0}"
 CELL_TOKEN="${CELL_TOKEN:-dev-cell-token}"
 TENANT_TOKEN="${TENANT_TOKEN:-dev-tenant-token}"
+TENANT_B_TOKEN="${TENANT_B_TOKEN:-dev-tenant-b-token}"
 STRIMZI_DIR="$ROOT/third_party/strimzi/1.3.0"
 OPNS=streamcell-operators
 
@@ -74,8 +75,12 @@ CP_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{e
 sed "s#__APISERVER_IP__#${CP_IP}#" "$ROOT/deploy/kind/cell.json" > "$STATE/cell.json"
 DATABASE_URL="$DB_URL" CELL_TOKEN="$CELL_TOKEN" "$ROOT/bin/streamcell-admin" register-cell "$STATE/cell.json"
 DATABASE_URL="$DB_URL" "$ROOT/bin/streamcell-admin" register-tenant dev-tenant "Dev tenant"
+DATABASE_URL="$DB_URL" "$ROOT/bin/streamcell-admin" register-tenant tenant-b "Second dev tenant (isolation tests)"
 
 # --- run control plane + agent ---
+# Secrets: the dev OpenBao started by hack/e2e-deps.sh. The agent reads user passwords from it; the
+# database never holds them.
+SECRETS_ENV=(SECRETS_BACKEND=openbao OPENBAO_ADDR="$STREAMCELL_E2E_OPENBAO_ADDR" OPENBAO_TOKEN="$STREAMCELL_E2E_OPENBAO_TOKEN")
 start() { # name, then command with env
   local name=$1; shift
   if [[ -f "$STATE/$name.pid" ]] && kill -0 "$(cat "$STATE/$name.pid")" 2>/dev/null; then return; fi
@@ -83,9 +88,9 @@ start() { # name, then command with env
   echo $! >"$STATE/$name.pid"
 }
 start api DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" \
-  STREAMCELL_DEV_TOKENS="$TENANT_TOKEN:dev-tenant" LISTEN=127.0.0.1:8080 CELL_LISTEN=127.0.0.1:8081 "$ROOT/bin/streamcell-api"
-start worker DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" "$ROOT/bin/streamcell-worker"
+  STREAMCELL_DEV_TOKENS="$TENANT_TOKEN:dev-tenant,$TENANT_B_TOKEN:tenant-b" "${SECRETS_ENV[@]}" LISTEN=127.0.0.1:8080 CELL_LISTEN=127.0.0.1:8081 "$ROOT/bin/streamcell-api"
+start worker DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" "${SECRETS_ENV[@]}" "$ROOT/bin/streamcell-worker"
 start agent CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="$CELL_TOKEN" STATE_NAMESPACE=streamcell-system NODEPOOL_PROVIDER=kind \
-  KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" STATUS_EVERY=5s "$ROOT/bin/streamcell-agent"
+  KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" STATUS_EVERY=5s "${SECRETS_ENV[@]}" "$ROOT/bin/streamcell-agent"
 for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
 echo "Local cell is up. API: http://127.0.0.1:8080 (Authorization: Bearer $TENANT_TOKEN). Logs: $STATE"

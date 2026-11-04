@@ -55,6 +55,13 @@ jobs:
           kubectl -n streamcell-system logs job/streamcell-admission-certgen --tail=50 || true
           kubectl get kafka,kafkanodepool -A -o yaml || true
           kubectl get tlsroute,gateway -A -o yaml | head -200 || true
+          kubectl get kafkauser -A -o yaml | head -200 || true
+          kubectl get networkpolicy -A || true
+          kubectl -n envoy-gateway-system get svc,pods -o wide || true
+          kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=100 || true
+          kubectl -n streamcell-gateway get gateway -o yaml | head -80 || true
+          kubectl get pods -A -l app.kubernetes.io/name=envoy -o name | head -3 | xargs -r -I{} sh -c 'echo "== {}"; kubectl -n envoy-gateway-system logs {} -c envoy --tail=50' || true
+          cat .cache/kind/gw-forward.log || true
           kubectl get events -A --sort-by=.lastTimestamp | tail -80 || true
           kubectl -n streamcell-operators logs deploy/strimzi-cluster-operator --tail=300 || true
           for f in .cache/kind/*.log; do echo "== $f"; tail -100 "$f"; done

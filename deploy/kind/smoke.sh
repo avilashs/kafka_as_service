@@ -7,7 +7,11 @@
 #   shared     M1: create a shared cluster, SIGKILL the workflow worker mid-create, verify no
 #              duplicates and placement, delete.
 #
-# usage: smoke.sh [dedicated|shared|all]
+#   connect    M3: real Kafka clients through the public endpoints (SNI TLS passthrough via the
+#              gateway) with SCRAM, ACLs, Admin API and transactions; tenant isolation by
+#              credentials, CA and network. Implemented in connect.sh.
+#
+# usage: smoke.sh [dedicated|shared|connect|all]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 STATE="$ROOT/.cache/kind"
@@ -286,7 +290,8 @@ scenario_shared() {
   sleep 5
   eval "$("$ROOT/hack/e2e-deps.sh" up)"
   nohup env DATABASE_URL="${STREAMCELL_E2E_DATABASE_URL%/postgres?sslmode=disable}/streamcell?sslmode=disable" \
-    TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" "$ROOT/bin/streamcell-worker" >"$STATE/worker2.log" 2>&1 &
+    TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" SECRETS_BACKEND=openbao OPENBAO_ADDR="$STREAMCELL_E2E_OPENBAO_ADDR" \
+    OPENBAO_TOKEN="$STREAMCELL_E2E_OPENBAO_TOKEN" "$ROOT/bin/streamcell-worker" >"$STATE/worker2.log" 2>&1 &
   echo $! >"$STATE/worker.pid"
   wait_op "$OP" 1500
 
@@ -318,10 +323,14 @@ scenario_shared() {
   echo "  shared scenario PASS"
 }
 
+# shellcheck source=deploy/kind/connect.sh
+source "$ROOT/deploy/kind/connect.sh"
+
 case "${1:-all}" in
   dedicated) scenario_dedicated ;;
   shared)    scenario_shared ;;
-  all)       scenario_dedicated; scenario_shared ;;
-  *) echo "usage: $0 [dedicated|shared|all]" >&2; exit 2 ;;
+  connect)   scenario_connect ;;
+  all)       scenario_dedicated; scenario_shared; scenario_connect ;;
+  *) echo "usage: $0 [dedicated|shared|connect|all]" >&2; exit 2 ;;
 esac
 echo PASS
