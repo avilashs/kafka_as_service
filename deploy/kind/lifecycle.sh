@@ -74,7 +74,7 @@ run_op() {
 check_config() {
   local v; v=$(kubectl -n "$LIFE_CID" get kafka "$LIFE_CID" -o jsonpath='{.spec.kafka.config.log\.retention\.hours}')
   [[ "$v" == 48 ]] && life_record PASS "config: log.retention.hours=48 is in the cell" || life_record FAIL "config: log.retention.hours in the cell is '$v'"
-  local live; live=$(kafka kafka-configs --bootstrap-server "$LIFE_BOOT" --command-config "$LIFE_ADM" --describe --entity-type brokers --entity-name 3 --all 2>&1 | grep -E 'log.retention.hours' | head -1)
+  local live; live=$(kafka kafka-configs --bootstrap-server "$LIFE_BOOT" --command-config "$LIFE_ADM" --describe --entity-type brokers --entity-name 3 --all 2>&1 | grep -E 'log.retention.hours' | head -1 || true)
   echo "    broker config as seen through the Admin API: ${live:-<not reported>}"
 }
 check_size() {
