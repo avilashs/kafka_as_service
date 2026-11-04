@@ -225,9 +225,9 @@ scenario_connect() {
   expect_ok "admin: grant reader Read on private-1 with kafka-acls (CreateAcls over the public endpoint)" \
     kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --add --allow-principal User:reader --operation Read --operation Describe --topic private-1
   expect_ok "admin: list ACLs (DescribeAcls)" kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --list --topic private-1
-  echo "y" | produce "$adm" private-1 "$boot_a" >/dev/null 2>&1 || true
-  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic private-1 --group grp-3 --from-beginning --max-messages 1 --timeout-ms 60000 2>/dev/null | grep -c '^y$' || true)
-  [[ "$got" == 1 ]] && record PASS "reader reads private-1 once the tenant admin granted it" || record FAIL "reader could not read private-1 after the grant (got $got)"
+  expect_ok "admin: write a message to private-1" bash -c "echo secret-y | docker run --rm -i --network host ${HOSTS[*]} -v $WORK:/work:ro --entrypoint /opt/kafka/bin/kafka-console-producer.sh $KAFKA_IMAGE --bootstrap-server $boot_a --producer.config $adm --topic private-1"
+  local cout; cout=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic private-1 --group grp-3 --from-beginning --max-messages 1 --timeout-ms 60000 2>&1 || true)
+  if grep -q '^secret-y$' <<<"$cout"; then record PASS "reader reads private-1 once the tenant admin granted it"; else record FAIL "reader could not read private-1 after the grant"; sed 's/^/      | /' <<<"$cout" | tail -12; fi
   check_denied "admin cannot grant cluster-level Alter" "authoriz|platform|denied" \
     kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --add --allow-principal User:reader --cluster --operation Alter
   check_denied "admin cannot create a reserved topic" "authoriz|denied" \
@@ -389,7 +389,7 @@ PROPS
   produce_mtls() { seq 1 20 | sed 's/^/mtls-/' | kafka kafka-console-producer --bootstrap-server "$boot_m" --producer.config /work/mtls-a.properties --topic orders-1; }
   expect_ok "mTLS: produce 20 messages to orders-1 (ACL from the user's spec)" produce_mtls
   local got
-  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_m" --consumer.config /work/mtls-a.properties --topic orders-1 --group grp-m --from-beginning --max-messages 20 --timeout-ms 60000 2>/dev/null | grep -c '^mtls-' || true)
+  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_m" --consumer.config /work/mtls-a.properties --topic orders-1 --group grp-m --from-beginning --max-messages 70 --timeout-ms 60000 2>/dev/null | grep -c '^mtls-' || true)
   [[ "$got" == 20 ]] && record PASS "mTLS: consume the 20 messages back" || record FAIL "mTLS: consumed $got of 20"
   check_denied "mTLS user is held to its ACLs (cannot write private-1)" "not authorized|authorization" \
     bash -c "echo x | docker run --rm -i --network host ${HOSTS[*]} -v $WORK:/work:ro --entrypoint /opt/kafka/bin/kafka-console-producer.sh $KAFKA_IMAGE --bootstrap-server $boot_m --producer.config /work/mtls-a.properties --topic private-1"
