@@ -6,7 +6,7 @@ Streamcell is an open-source, self-hostable platform for managed **Apache KafkaÂ
 
 ## Quick start (local cell on kind, real Strimzi)
 
-Requires docker, kind, kubectl, helm and Go 1.26.
+Requires docker, kind, kubectl, helm and Go 1.26. The cell has 7 kind nodes, so on Linux raise the inotify limits first: `sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512`.
 
 ```bash
 make kind-up      # kind cell + Strimzi 1.3.0 + Envoy Gateway; Postgres, Temporal, api/worker/agent on the host
