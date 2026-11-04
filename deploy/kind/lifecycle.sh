@@ -37,11 +37,11 @@ finish_load() {
   touch "$WORK/stop-$1"
   wait "$LOAD_PID" 2>/dev/null || true
   LOAD_PID=""
-  local produced verdict
+  local produced verdict rc=0
   produced=$(tail -1 "$WORK/produce-$1.log")
   verdict=$(STREAMCELL_LOADTEST_PASSWORD="$LIFE_PW" "$LOADTEST" verify -bootstrap "$LIFE_BOOT" -user admin1 -ca "$WORK/ca-$LIFE_CID.pem" \
-    -dial 127.0.0.1:443 -topic load -ledger "$WORK/ledger-$1" 2>&1)
-  local rc=$?
+    -dial 127.0.0.1:443 -topic load -ledger "$WORK/ledger-$1" 2>&1) || rc=$?
+  [[ $rc -eq 0 ]] || { echo "    verifier exit $rc; producer log:"; sed 's/^/      | /' "$WORK/produce-$1.log" | tail -8; }
   echo "    $produced"
   echo "    verify: $(head -1 <<<"$verdict")"
   if [[ $rc -eq 0 ]] && grep -q 'lost=0 duplicated=0 corrupt=0 reordered=0' <<<"$verdict" && grep -qE 'acked=[1-9][0-9]*' <<<"$verdict"; then

@@ -3,6 +3,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: "kind smoke scenario (all, dedicated, shared, connect, lifecycle)"
+        default: all
 permissions:
   contents: read
 jobs:
@@ -53,7 +57,7 @@ jobs:
           chmod +x "$HOME/.local/bin/kind"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: make kind-up
-      - run: make kind-smoke
+      - run: deploy/kind/smoke.sh "${{ inputs.scenario || 'all' }}"
       - name: Diagnostics
         if: failure()
         run: |

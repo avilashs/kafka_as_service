@@ -44,6 +44,7 @@ func (c Conn) opts() ([]kgo.Opt, error) {
 	if c.User != "" {
 		opts = append(opts, kgo.SASL(scram.Auth{User: c.User, Pass: c.Password}.AsSha512Mechanism()))
 	}
+	var tlsCfg *tls.Config
 	if c.CAFile != "" {
 		pem, err := os.ReadFile(c.CAFile)
 		if err != nil {
@@ -53,13 +54,30 @@ func (c Conn) opts() ([]kgo.Opt, error) {
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, errors.New("no certificate in " + c.CAFile)
 		}
-		opts = append(opts, kgo.DialTLSConfig(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}))
+		tlsCfg = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	if c.DialAddr != "" {
+	switch {
+	case c.DialAddr != "":
+		// Every connection goes to one address (a local relay), but the certificate is still verified against
+		// the broker's own host name, exactly as a client that resolved the name would do.
 		d := &net.Dialer{Timeout: 10 * time.Second}
-		opts = append(opts, kgo.Dialer(func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return d.DialContext(ctx, network, c.DialAddr)
+		opts = append(opts, kgo.Dialer(func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := d.DialContext(ctx, network, c.DialAddr)
+			if err != nil || tlsCfg == nil {
+				return conn, err
+			}
+			host, _, _ := net.SplitHostPort(addr)
+			cfg := tlsCfg.Clone()
+			cfg.ServerName = host
+			tc := tls.Client(conn, cfg)
+			if err := tc.HandshakeContext(ctx); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("tls handshake with %s: %w", host, err)
+			}
+			return tc, nil
 		}))
+	case tlsCfg != nil:
+		opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 	}
 	return append(opts, c.Extra...), nil
 }
