@@ -152,7 +152,7 @@ func tenantNamespace(t *testing.T, name string) {
 func podTemplates(t *testing.T, b *engine.Bundle, clusterID string) map[string]*corev1.Pod {
 	t.Helper()
 	out := map[string]*corev1.Pod{}
-	conv := func(name string, tmpl map[string]any) {
+	conv := func(name string, tmpl, ctr map[string]any) {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: clusterID + "-" + name + "-0", Namespace: clusterID},
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "registry.k8s.io/pause:3.10"}}},
@@ -165,7 +165,8 @@ func podTemplates(t *testing.T, b *engine.Bundle, clusterID string) map[string]*
 				}
 			}
 		}
-		for field, dst := range map[string]any{"affinity": &pod.Spec.Affinity, "tolerations": &pod.Spec.Tolerations, "topologySpreadConstraints": &pod.Spec.TopologySpreadConstraints} {
+		for field, dst := range map[string]any{"affinity": &pod.Spec.Affinity, "tolerations": &pod.Spec.Tolerations,
+			"topologySpreadConstraints": &pod.Spec.TopologySpreadConstraints, "securityContext": &pod.Spec.SecurityContext} {
 			if v, ok := tmpl[field]; ok {
 				raw, _ := json.Marshal(v)
 				if err := json.Unmarshal(raw, dst); err != nil {
@@ -173,18 +174,30 @@ func podTemplates(t *testing.T, b *engine.Bundle, clusterID string) map[string]*
 				}
 			}
 		}
+		// The container template's security context is what Strimzi applies to the main container.
+		if sc, ok := ctr["securityContext"]; ok {
+			raw, _ := json.Marshal(sc)
+			var c corev1.SecurityContext
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Fatalf("convert container securityContext: %v", err)
+			}
+			pod.Spec.Containers[0].SecurityContext = &c
+		}
 		out[name] = pod
 	}
 	for _, o := range b.Objects {
 		switch o.GetKind() {
 		case "KafkaNodePool":
 			tmpl, _, _ := unstructured.NestedMap(o.Object, "spec", "template", "pod")
-			conv(o.GetName(), tmpl)
+			ctr, _, _ := unstructured.NestedMap(o.Object, "spec", "template", "kafkaContainer")
+			conv(o.GetName(), tmpl, ctr)
 		case "Kafka":
 			cc, _, _ := unstructured.NestedMap(o.Object, "spec", "cruiseControl", "template", "pod")
-			conv("cruise-control", cc)
+			ccc, _, _ := unstructured.NestedMap(o.Object, "spec", "cruiseControl", "template", "cruiseControlContainer")
+			conv("cruise-control", cc, ccc)
 			eo, _, _ := unstructured.NestedMap(o.Object, "spec", "entityOperator", "template", "pod")
-			conv("entity-operator", eo)
+			eoc, _, _ := unstructured.NestedMap(o.Object, "spec", "entityOperator", "template", "userOperatorContainer")
+			conv("entity-operator", eo, eoc)
 		}
 	}
 	return out

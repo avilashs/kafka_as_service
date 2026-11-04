@@ -304,6 +304,43 @@ func TestEveryRenderedPodTemplateHasPlacementLabels(t *testing.T) {
 	}
 }
 
+// Every operand pod gets the Restricted profile from the platform, because Strimzi sets none (spike S-4).
+func TestRenderedPodsAreHardened(t *testing.T) {
+	b := render(t, engine.TierShared, okSpec())
+	k := find(b, "Kafka", "kc-0123456789")
+	type spot struct {
+		what string
+		obj  *unstructured.Unstructured
+		path []string // to the template map
+		ctrs []string // container templates that must carry the context
+	}
+	for _, sp := range []spot{
+		{"brokers", find(b, "KafkaNodePool", "brokers"), []string{"spec", "template"}, []string{"kafkaContainer", "initContainer"}},
+		{"controllers", find(b, "KafkaNodePool", "controllers"), []string{"spec", "template"}, []string{"kafkaContainer", "initContainer"}},
+		{"cruise-control", k, []string{"spec", "cruiseControl", "template"}, []string{"cruiseControlContainer"}},
+		{"entity-operator", k, []string{"spec", "entityOperator", "template"}, []string{"userOperatorContainer"}},
+	} {
+		tmpl, _, _ := unstructured.NestedMap(sp.obj.Object, sp.path...)
+		psc, _, _ := unstructured.NestedMap(tmpl, "pod", "securityContext")
+		if psc["runAsNonRoot"] != true {
+			t.Errorf("%s: pod runAsNonRoot = %v", sp.what, psc["runAsNonRoot"])
+		}
+		if sc, _ := psc["seccompProfile"].(map[string]any); sc["type"] != "RuntimeDefault" {
+			t.Errorf("%s: seccompProfile = %v", sp.what, psc["seccompProfile"])
+		}
+		for _, c := range sp.ctrs {
+			csc, _, _ := unstructured.NestedMap(tmpl, c, "securityContext")
+			if csc["allowPrivilegeEscalation"] != false {
+				t.Errorf("%s/%s: allowPrivilegeEscalation = %v", sp.what, c, csc["allowPrivilegeEscalation"])
+			}
+			drop, _, _ := unstructured.NestedStringSlice(csc, "capabilities", "drop")
+			if len(drop) != 1 || drop[0] != "ALL" {
+				t.Errorf("%s/%s: capabilities.drop = %v", sp.what, c, drop)
+			}
+		}
+	}
+}
+
 func TestRenderControllersOnControlPool(t *testing.T) {
 	b := render(t, engine.TierShared, okSpec())
 	pod := podTemplate(t, b, "controllers")

@@ -132,6 +132,33 @@ func TestAdmissionPolicyRejectsBadPods(t *testing.T) {
 			{"hostPort", "brokers", func(p *corev1.Pod) {
 				p.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 9092, HostPort: 9092}}
 			}, "[privileged]"},
+
+			// --- restricted pod security (M3) ---
+			{"container without any security context", "brokers", func(p *corev1.Pod) { p.Spec.Containers[0].SecurityContext = nil }, "[security]"},
+			{"privilege escalation allowed", "brokers", func(p *corev1.Pod) {
+				p.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = ptr.To(true)
+			}, "[security]"},
+			{"capabilities not dropped", "brokers", func(p *corev1.Pod) { p.Spec.Containers[0].SecurityContext.Capabilities = nil }, "[security]"},
+			{"only some capabilities dropped", "brokers", func(p *corev1.Pod) {
+				p.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"NET_RAW"}}
+			}, "[security]"},
+			{"pod may run as root", "brokers", func(p *corev1.Pod) { p.Spec.SecurityContext.RunAsNonRoot = ptr.To(false) }, "[security]"},
+			{"pod without a security context", "controllers", func(p *corev1.Pod) { p.Spec.SecurityContext = nil }, "[security]"},
+			{"container overrides non-root with root", "brokers", func(p *corev1.Pod) {
+				p.Spec.Containers[0].SecurityContext.RunAsNonRoot = ptr.To(false)
+			}, "[security]"},
+			{"seccomp unconfined", "brokers", func(p *corev1.Pod) {
+				p.Spec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
+			}, "[security]"},
+			{"no seccomp profile", "brokers", func(p *corev1.Pod) { p.Spec.SecurityContext.SeccompProfile = nil }, "[security]"},
+			{"init container without a security context", "brokers", func(p *corev1.Pod) {
+				p.Spec.InitContainers = []corev1.Container{{Name: "i", Image: "x"}}
+			}, "[security]"},
+			{"compliant init container is fine", "brokers", func(p *corev1.Pod) {
+				c := p.Spec.Containers[0].DeepCopy()
+				c.Name = "init"
+				p.Spec.InitContainers = []corev1.Container{*c}
+			}, ""},
 		}
 		if tier == engine.TierShared {
 			return append(common, []podCase{

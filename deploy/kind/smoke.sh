@@ -199,11 +199,15 @@ metadata:
   labels: { streamcell.dev/cluster: "$CID", streamcell.dev/role: probe, streamcell.dev/required-pool: shared }
 spec:
   schedulerName: nobody   # stays Pending: nothing schedules it, so the only binding is ours
+  securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms: [{ matchExpressions: [{ key: streamcell.dev/pool, operator: In, values: [shared] }] }]
-  containers: [{ name: c, image: registry.k8s.io/pause:3.10 }]
+  containers:
+    - name: c
+      image: registry.k8s.io/pause:3.10
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 EOF
   expect_refused "binding a shared-pool pod to a dedicated node" "streamcell placement guard" \
     kubectl create --raw "/api/v1/namespaces/$CID/pods/probe/binding" -f - <<EOF

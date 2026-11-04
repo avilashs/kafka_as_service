@@ -47,6 +47,13 @@ spec:
           : []
     - name: spreadSelector
       expression: "{'streamcell.dev/cluster': variables.cluster, 'streamcell.dev/role': variables.role}"
+    # Pod-level defaults that containers inherit unless they set their own.
+    - name: podNonRoot
+      expression: "has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot"
+    - name: podSeccompDefault
+      expression: |-
+        has(object.spec.securityContext) && has(object.spec.securityContext.seccompProfile) &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault'
   validations:
     - expression: |-
         variables.cluster != '' && variables.role != '' &&
@@ -135,6 +142,22 @@ spec:
           (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
       reason: Forbidden
       message: "streamcell placement policy [privileged]: privileged containers and hostPort are forbidden"
+
+    # Restricted Pod Security profile, enforced for every container including init containers.
+    # A container's own setting wins over the pod's, so an explicit runAsNonRoot: false is refused.
+    - expression: |-
+        (object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])).all(c,
+          has(c.securityContext) &&
+          has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false &&
+          has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) &&
+          'ALL' in c.securityContext.capabilities.drop &&
+          (has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : variables.podNonRoot) &&
+          (has(c.securityContext.seccompProfile) ? c.securityContext.seccompProfile.type == 'RuntimeDefault' : variables.podSeccompDefault))
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [security]: every container (init containers too) must set
+        allowPrivilegeEscalation: false, drop ALL capabilities, run as non-root and use the RuntimeDefault
+        seccomp profile (on the container or the pod)
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

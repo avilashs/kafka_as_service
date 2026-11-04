@@ -42,6 +42,8 @@ up() {
   fetch_tools
   if ! docker inspect streamcell-e2e-pg >/dev/null 2>&1; then
     docker run -d --name streamcell-e2e-pg -e POSTGRES_PASSWORD=e2e -p "127.0.0.1:${PG_PORT}:5432" "$POSTGRES_IMAGE" >/dev/null
+  elif [[ "$(docker inspect -f '{{.State.Running}}' streamcell-e2e-pg)" != true ]]; then
+    docker start streamcell-e2e-pg >/dev/null # left over from an earlier session
   fi
   for _ in $(seq 1 60); do
     docker exec streamcell-e2e-pg pg_isready -U postgres >/dev/null 2>&1 && break

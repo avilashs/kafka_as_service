@@ -111,7 +111,10 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 				"userOperator": map[string]any{
 					"resources": res(eoRes.CPURequestMilli, eoRes.CPULimitMilli, eoRes.MemoryMiB),
 				},
-				"template": map[string]any{"pod": controlPoolPod(rs.ID, "entity-operator", common)},
+				"template": map[string]any{
+					"pod":                   withPodSecurity(controlPoolPod(rs.ID, "entity-operator", common)),
+					"userOperatorContainer": map[string]any{"securityContext": containerSecurityContext()},
+				},
 			},
 			"cruiseControl": map[string]any{
 				"resources": res(ccRes.CPURequestMilli, ccRes.CPULimitMilli, ccRes.MemoryMiB),
@@ -119,7 +122,10 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 					map[string]any{"mode": "add-brokers"},
 					map[string]any{"mode": "remove-brokers"},
 				},
-				"template": map[string]any{"pod": controlPoolPod(rs.ID, "cruise-control", common)},
+				"template": map[string]any{
+					"pod":                    withPodSecurity(controlPoolPod(rs.ID, "cruise-control", common)),
+					"cruiseControlContainer": map[string]any{"securityContext": containerSecurityContext()},
+				},
 			},
 		},
 	}
@@ -233,9 +239,39 @@ func nodePool(cluster, name string, common map[string]any, roles []any, replicas
 			"resources":  resources,
 			"jvmOptions": map[string]any{"-Xms": heap, "-Xmx": heap},
 			"storage":    storage,
-			"template":   map[string]any{"pod": pod},
+			"template": map[string]any{
+				"pod":            withPodSecurity(pod),
+				"kafkaContainer": map[string]any{"securityContext": containerSecurityContext()},
+				"initContainer":  map[string]any{"securityContext": containerSecurityContext()},
+			},
 		},
 	}
+}
+
+// podSecurityContext is the pod-level part of the Restricted Pod Security profile. Strimzi sets no
+// security context on operand pods (seen in CI, spike S-4), so the platform must. Setting a pod
+// security context replaces Strimzi's default one, so fsGroup 0 (its default) is kept: the Kafka
+// image's user (1001) is in group 0 and needs it to write to freshly formatted volumes.
+func podSecurityContext() map[string]any {
+	return map[string]any{
+		"runAsNonRoot":   true,
+		"fsGroup":        0,
+		"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+	}
+}
+
+// containerSecurityContext is the container-level part. readOnlyRootFilesystem is not set yet:
+// it needs a verified list of writable paths for Strimzi's images (see docs/milestones/m3.md).
+func containerSecurityContext() map[string]any {
+	return map[string]any{
+		"allowPrivilegeEscalation": false,
+		"capabilities":             map[string]any{"drop": []any{"ALL"}},
+	}
+}
+
+func withPodSecurity(pod map[string]any) map[string]any {
+	pod["securityContext"] = podSecurityContext()
+	return pod
 }
 
 func zoneSpread(selector map[string]any) []any {
