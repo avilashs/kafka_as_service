@@ -172,10 +172,6 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request, tenant st
 		writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", `tier must be "shared" or "dedicated"`)
 		return
 	}
-	if tier == engine.TierDedicated {
-		writeErr(w, http.StatusUnprocessableEntity, "NOT_AVAILABLE", "the dedicated tier is not available yet (milestone M2)")
-		return
-	}
 	hash, err := canonicalHash(req)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())

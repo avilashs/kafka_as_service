@@ -20,9 +20,6 @@ import (
 // ErrExhausted is terminal: no ACTIVE cell can fit the request.
 var ErrExhausted = errors.New("no cell has capacity for this cluster")
 
-// ErrUnsupported is terminal: the request needs accounting that is not built yet.
-var ErrUnsupported = errors.New("dedicated-tier capacity accounting is not implemented yet (milestone M2)")
-
 // Allocator chooses a cell and reserves capacity in it.
 type Allocator struct {
 	Store *store.Store
@@ -33,6 +30,7 @@ type item struct {
 	pool, zone            string
 	cpu, mem, ebs, attach int64
 	pods                  int
+	nodes                 int // whole nodes (dedicated pools)
 	// maxGroupPods is the largest number of replicas of any single group in this
 	// pool and zone; anti-affinity puts each of them on a distinct node.
 	maxGroupPods int
@@ -110,7 +108,7 @@ var errNoFit = errors.New("does not fit")
 func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string, req engine.PlacementRequest) (engine.Assignment, error) {
 	var as engine.Assignment
 	err := a.Store.InTx(ctx, func(tx pgx.Tx) error {
-		items, zones, err := demand(ctx, tx, cellID, req)
+		items, zones, groupZones, err := demand(ctx, tx, cellID, req)
 		if err != nil {
 			return err
 		}
@@ -128,13 +126,18 @@ func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string,
 				FROM pool_capacity WHERE pool_id=$1 AND zone=$2 FOR UPDATE`, it.pool, it.zone).Scan(&cpuT, &memT, &ebsT, &attT, &nodesT); err != nil {
 				return err
 			}
-			var cpuU, memU, ebsU, attU int64
-			if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(i.cpu_m),0), COALESCE(sum(i.mem_mib),0), COALESCE(sum(i.ebs_mbps),0), COALESCE(sum(i.attach),0)
+			var cpuU, memU, ebsU, attU, nodesU int64
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(i.cpu_m),0), COALESCE(sum(i.mem_mib),0), COALESCE(sum(i.ebs_mbps),0),
+					COALESCE(sum(i.attach),0), COALESCE(sum(i.nodes),0)
 				FROM reservation_items i JOIN reservations r ON r.id = i.reservation_id
-				WHERE i.pool_id=$1 AND i.zone=$2 AND r.status <> 'RELEASED'`, it.pool, it.zone).Scan(&cpuU, &memU, &ebsU, &attU); err != nil {
+				WHERE i.pool_id=$1 AND i.zone=$2 AND r.status <> 'RELEASED'`, it.pool, it.zone).Scan(&cpuU, &memU, &ebsU, &attU, &nodesU); err != nil {
 				return err
 			}
 			if cpuU+it.cpu > cpuT || memU+it.mem > memT || ebsU+it.ebs > ebsT || attU+it.attach > attT || it.maxGroupPods > nodesT {
+				return errNoFit
+			}
+			// Dedicated pools hand out whole nodes: the budget is nodes_total per zone.
+			if nodesU+int64(it.nodes) > int64(nodesT) {
 				return errNoFit
 			}
 		}
@@ -142,7 +145,7 @@ func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string,
 		if err != nil {
 			return err
 		}
-		as = engine.Assignment{CellID: cellID, Zones: zones, OperatorShard: shard}
+		as = engine.Assignment{CellID: cellID, Zones: zones, GroupZones: groupZones, OperatorShard: shard}
 		raw, _ := json.Marshal(as)
 		resID := "res-" + uuid.NewString()
 		ttl := a.TTL
@@ -155,8 +158,8 @@ func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string,
 		}
 		for _, k := range keys {
 			it := items[k]
-			if _, err := tx.Exec(ctx, `INSERT INTO reservation_items (reservation_id, pool_id, zone, cpu_m, mem_mib, ebs_mbps, attach, pods)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, resID, it.pool, it.zone, it.cpu, it.mem, it.ebs, it.attach, it.pods); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO reservation_items (reservation_id, pool_id, zone, cpu_m, mem_mib, ebs_mbps, attach, pods, nodes)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, resID, it.pool, it.zone, it.cpu, it.mem, it.ebs, it.attach, it.pods, it.nodes); err != nil {
 				return err
 			}
 		}
@@ -166,39 +169,52 @@ func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string,
 }
 
 // demand spreads each group's replicas across the pool's zones and sums per (pool, zone).
-func demand(ctx context.Context, tx pgx.Tx, cellID string, req engine.PlacementRequest) (map[string]*item, []string, error) {
+// Dedicated groups (one pod per whole node) reserve nodes from a per-instance-type
+// budget pool and must fit the node shape; other groups reserve CPU, memory, volume
+// bandwidth and attachment slots.
+func demand(ctx context.Context, tx pgx.Tx, cellID string, req engine.PlacementRequest) (map[string]*item, []string, map[string][]string, error) {
 	items := map[string]*item{}
+	groupZones := map[string][]string{}
 	var allZones []string
 	for _, g := range req.Groups {
-		if g.Pool == engine.PoolDedicated {
-			return nil, nil, ErrUnsupported
-		}
+		dedicated := g.Pool == engine.PoolDedicated
 		var poolID string
-		err := tx.QueryRow(ctx, `SELECT id FROM node_pools WHERE cell_id=$1 AND kind=$2 ORDER BY id LIMIT 1`, cellID, string(g.Pool)).Scan(&poolID)
+		var nodeCPU, nodeMem int64
+		var err error
+		if dedicated {
+			err = tx.QueryRow(ctx, `SELECT id, node_cpu_milli, node_mem_mib FROM node_pools
+				WHERE cell_id=$1 AND kind='dedicated' AND instance_type=$2 ORDER BY id LIMIT 1`, cellID, g.InstanceType).Scan(&poolID, &nodeCPU, &nodeMem)
+		} else {
+			err = tx.QueryRow(ctx, `SELECT id FROM node_pools WHERE cell_id=$1 AND kind=$2 ORDER BY id LIMIT 1`, cellID, string(g.Pool)).Scan(&poolID)
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, errNoFit
+			return nil, nil, nil, errNoFit
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		if dedicated && (g.PerPod.CPURequestMilli > nodeCPU || g.PerPod.MemoryMiB > nodeMem) {
+			return nil, nil, nil, errNoFit // the pod does not fit one node of this shape
 		}
 		rows, err := tx.Query(ctx, `SELECT zone FROM pool_capacity WHERE pool_id=$1 ORDER BY zone`, poolID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		var zones []string
 		for rows.Next() {
 			var z string
 			if err := rows.Scan(&z); err != nil {
 				rows.Close()
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			zones = append(zones, z)
 		}
 		rows.Close()
 		if len(zones) < g.Zones {
-			return nil, nil, errNoFit
+			return nil, nil, nil, errNoFit
 		}
 		zones = zones[:g.Zones]
+		groupZones[g.Name] = zones
 		if allZones == nil {
 			allZones = zones
 		}
@@ -210,16 +226,20 @@ func demand(ctx context.Context, tx pgx.Tx, cellID string, req engine.PlacementR
 				it = &item{pool: poolID, zone: z, groupPods: map[string]int{}}
 				items[k] = it
 			}
+			it.pods++
+			it.groupPods[g.Name]++
+			it.maxGroupPods = max(it.maxGroupPods, it.groupPods[g.Name])
+			if dedicated {
+				it.nodes++
+				continue
+			}
 			it.cpu += g.PerPod.CPURequestMilli
 			it.mem += g.PerPod.MemoryMiB
 			it.ebs += g.PerPod.VolumeMBps
 			it.attach += g.PerPod.Volumes
-			it.pods++
-			it.groupPods[g.Name]++
-			it.maxGroupPods = max(it.maxGroupPods, it.groupPods[g.Name])
 		}
 	}
-	return items, allZones, nil
+	return items, allZones, groupZones, nil
 }
 
 func leastLoadedShard(ctx context.Context, tx pgx.Tx, cellID string) (int, error) {

@@ -112,9 +112,9 @@ func (e *Engine) PlanPlacement(rs engine.ResourceSpec) (engine.PlacementRequest,
 		return engine.PlacementRequest{}, engine.Invalid("unknown brokerType %q", s.BrokerType)
 	}
 	ct := controllerFor(bt)
-	brokerPool, excl := engine.PoolShared, engine.ExclusivePerGroupPerNode
+	brokerPool, excl, instance := engine.PoolShared, engine.ExclusivePerGroupPerNode, ""
 	if rs.Tier == engine.TierDedicated {
-		brokerPool, excl = engine.PoolDedicated, engine.ExclusiveWholeNode
+		brokerPool, excl, instance = engine.PoolDedicated, engine.ExclusiveWholeNode, bt.InstanceType
 	}
 	vols := int64(1)
 	if bt.LocalNVMe {
@@ -133,7 +133,7 @@ func (e *Engine) PlanPlacement(rs engine.ResourceSpec) (engine.PlacementRequest,
 			Exclusive: engine.ExclusivePerGroupPerNode, PerPod: clusterServices(bt),
 		},
 		{
-			Name: "brokers", Replicas: s.BrokerCount, Pool: brokerPool, Zones: 3, Exclusive: excl,
+			Name: "brokers", Replicas: s.BrokerCount, Pool: brokerPool, Zones: 3, Exclusive: excl, InstanceType: instance,
 			PerPod: engine.Resources{CPURequestMilli: bt.CPURequestMilli, CPULimitMilli: bt.CPULimitMilli,
 				MemoryMiB: bt.MemoryMiB, Volumes: vols, VolumeMBps: bt.VolumeMBps, VolumeGiB: s.Storage.SizeGiB},
 		},

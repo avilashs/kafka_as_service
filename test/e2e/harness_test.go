@@ -132,6 +132,11 @@ func run(m *testing.M) int {
 		return 1
 	}
 
+	if err := installPolicies(); err != nil {
+		fmt.Println("e2e: admission policies:", err)
+		return 1
+	}
+
 	simCtx, cancelSim := context.WithCancel(ctx)
 	defer cancelSim()
 	sim = &opSim{dyn: dyn, kube: kube}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 
@@ -24,11 +25,14 @@ type CellSpec struct {
 
 // PoolSpec is a node pool with per-zone capacity.
 type PoolSpec struct {
-	ID           string         `json:"id"`
-	Kind         string         `json:"kind"`
-	InstanceType string         `json:"instanceType"`
-	MaxNodes     int            `json:"maxNodes"`
-	Zones        []ZoneCapacity `json:"zones"`
+	ID           string `json:"id"`
+	Kind         string `json:"kind"`
+	InstanceType string `json:"instanceType"`
+	MaxNodes     int    `json:"maxNodes"`
+	// NodeCPUMilli and NodeMemoryMiB are the allocatable resources of one node (dedicated pools).
+	NodeCPUMilli  int64          `json:"nodeCpuMilli,omitempty"`
+	NodeMemoryMiB int64          `json:"nodeMemoryMiB,omitempty"`
+	Zones         []ZoneCapacity `json:"zones"`
 }
 
 // ZoneCapacity is the total capacity of a pool in one zone.
@@ -70,11 +74,15 @@ func (s *Store) UpsertCell(ctx context.Context, c CellSpec) error {
 			for _, z := range p.Zones {
 				zones = append(zones, z.Zone)
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO node_pools (id, cell_id, kind, instance_type, zones, max_nodes)
-				VALUES ($1,$2,$3,$4,$5,$6)
+			if p.Kind == "dedicated" && (p.NodeCPUMilli <= 0 || p.NodeMemoryMiB <= 0) {
+				return fmt.Errorf("dedicated pool %s needs nodeCpuMilli and nodeMemoryMiB", p.ID)
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO node_pools (id, cell_id, kind, instance_type, zones, max_nodes, node_cpu_milli, node_mem_mib)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 				ON CONFLICT (id) DO UPDATE SET kind=EXCLUDED.kind, instance_type=EXCLUDED.instance_type,
-					zones=EXCLUDED.zones, max_nodes=EXCLUDED.max_nodes`,
-				p.ID, c.ID, p.Kind, p.InstanceType, zones, p.MaxNodes); err != nil {
+					zones=EXCLUDED.zones, max_nodes=EXCLUDED.max_nodes,
+					node_cpu_milli=EXCLUDED.node_cpu_milli, node_mem_mib=EXCLUDED.node_mem_mib`,
+				p.ID, c.ID, p.Kind, p.InstanceType, zones, p.MaxNodes, p.NodeCPUMilli, p.NodeMemoryMiB); err != nil {
 				return err
 			}
 			for _, z := range p.Zones {

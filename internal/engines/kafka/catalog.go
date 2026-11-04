@@ -17,6 +17,8 @@ type BrokerType struct {
 	EgressMbit      int64
 	MaxPartitions   int64 // partition replicas per broker
 	LocalNVMe       bool
+	// InstanceType is the node shape of dedicated sizes (one broker per node).
+	InstanceType string
 }
 
 // ControllerType is the KRaft controller size used for a tier.
@@ -35,13 +37,14 @@ var brokerTypes = map[string]BrokerType{
 	"s.medium": {Name: "s.medium", Tier: engine.TierShared, CPURequestMilli: 2000, CPULimitMilli: 4000, MemoryMiB: 12 * 1024, HeapMiB: 4 * 1024, MinStorageGiB: 10, MaxStorageGiB: 4 * 1024, VolumeMBps: 250, VolumeIOPS: 4000, EgressMbit: 500, MaxPartitions: 1000},
 	"s.large":  {Name: "s.large", Tier: engine.TierShared, CPURequestMilli: 4000, CPULimitMilli: 8000, MemoryMiB: 24 * 1024, HeapMiB: 6 * 1024, MinStorageGiB: 10, MaxStorageGiB: 8 * 1024, VolumeMBps: 500, VolumeIOPS: 6000, EgressMbit: 1000, MaxPartitions: 2000},
 	// Dedicated tier: Guaranteed, whole node minus reservation.
-	"d.xlarge":       {Name: "d.xlarge", Tier: engine.TierDedicated, CPURequestMilli: 3200, CPULimitMilli: 3200, MemoryMiB: 12800, HeapMiB: 4 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 250, VolumeIOPS: 6000, MaxPartitions: 2000},
-	"d.2xlarge":      {Name: "d.2xlarge", Tier: engine.TierDedicated, CPURequestMilli: 7000, CPULimitMilli: 7000, MemoryMiB: 27 * 1024, HeapMiB: 6 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 500, VolumeIOPS: 8000, MaxPartitions: 3000},
-	"d.4xlarge":      {Name: "d.4xlarge", Tier: engine.TierDedicated, CPURequestMilli: 15000, CPULimitMilli: 15000, MemoryMiB: 58 * 1024, HeapMiB: 8 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 1000, VolumeIOPS: 12000, MaxPartitions: 4000},
-	"d.8xlarge":      {Name: "d.8xlarge", Tier: engine.TierDedicated, CPURequestMilli: 31000, CPULimitMilli: 31000, MemoryMiB: 120 * 1024, HeapMiB: 10 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 1000, VolumeIOPS: 16000, MaxPartitions: 6000},
-	"d.nvme.2xlarge": {Name: "d.nvme.2xlarge", Tier: engine.TierDedicated, CPURequestMilli: 7000, CPULimitMilli: 7000, MemoryMiB: 58 * 1024, HeapMiB: 6 * 1024, MinStorageGiB: 1700, MaxStorageGiB: 1700, MaxPartitions: 3000, LocalNVMe: true},
-	"d.nvme.4xlarge": {Name: "d.nvme.4xlarge", Tier: engine.TierDedicated, CPURequestMilli: 15000, CPULimitMilli: 15000, MemoryMiB: 120 * 1024, HeapMiB: 8 * 1024, MinStorageGiB: 3400, MaxStorageGiB: 3400, MaxPartitions: 4000, LocalNVMe: true},
-	// Development size used by the kind environment only (tiny heap).
+	"d.xlarge":       {Name: "d.xlarge", Tier: engine.TierDedicated, InstanceType: "m7i.xlarge", CPURequestMilli: 3200, CPULimitMilli: 3200, MemoryMiB: 12800, HeapMiB: 4 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 250, VolumeIOPS: 6000, MaxPartitions: 2000},
+	"d.2xlarge":      {Name: "d.2xlarge", Tier: engine.TierDedicated, InstanceType: "m7i.2xlarge", CPURequestMilli: 7000, CPULimitMilli: 7000, MemoryMiB: 27 * 1024, HeapMiB: 6 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 500, VolumeIOPS: 8000, MaxPartitions: 3000},
+	"d.4xlarge":      {Name: "d.4xlarge", Tier: engine.TierDedicated, InstanceType: "m7i.4xlarge", CPURequestMilli: 15000, CPULimitMilli: 15000, MemoryMiB: 58 * 1024, HeapMiB: 8 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 1000, VolumeIOPS: 12000, MaxPartitions: 4000},
+	"d.8xlarge":      {Name: "d.8xlarge", Tier: engine.TierDedicated, InstanceType: "m7i.8xlarge", CPURequestMilli: 31000, CPULimitMilli: 31000, MemoryMiB: 120 * 1024, HeapMiB: 10 * 1024, MinStorageGiB: 100, MaxStorageGiB: 16 * 1024, VolumeMBps: 1000, VolumeIOPS: 16000, MaxPartitions: 6000},
+	"d.nvme.2xlarge": {Name: "d.nvme.2xlarge", Tier: engine.TierDedicated, InstanceType: "i4i.2xlarge", CPURequestMilli: 7000, CPULimitMilli: 7000, MemoryMiB: 58 * 1024, HeapMiB: 6 * 1024, MinStorageGiB: 1700, MaxStorageGiB: 1700, MaxPartitions: 3000, LocalNVMe: true},
+	"d.nvme.4xlarge": {Name: "d.nvme.4xlarge", Tier: engine.TierDedicated, InstanceType: "i4i.4xlarge", CPURequestMilli: 15000, CPULimitMilli: 15000, MemoryMiB: 120 * 1024, HeapMiB: 8 * 1024, MinStorageGiB: 3400, MaxStorageGiB: 3400, MaxPartitions: 4000, LocalNVMe: true},
+	// Development sizes used by the kind environment only (tiny heap).
+	"dev.ded":  {Name: "dev.ded", Tier: engine.TierDedicated, InstanceType: "kind", CPURequestMilli: 500, CPULimitMilli: 500, MemoryMiB: 768, HeapMiB: 256, MinStorageGiB: 1, MaxStorageGiB: 10, MaxPartitions: 100},
 	"dev.tiny": {Name: "dev.tiny", Tier: engine.TierShared, CPURequestMilli: 100, CPULimitMilli: 1000, MemoryMiB: 768, HeapMiB: 256, MinStorageGiB: 1, MaxStorageGiB: 10, VolumeMBps: 0, MaxPartitions: 100},
 }
 
@@ -64,21 +67,23 @@ func LookupBrokerType(name string) (BrokerType, bool) {
 }
 
 func controllerFor(bt BrokerType) ControllerType {
-	if bt.Name == "dev.tiny" {
+	if bt.Name == "dev.tiny" || bt.Name == "dev.ded" {
 		return devController
 	}
 	return controllerTypes[bt.Tier]
 }
 
+func isDev(bt BrokerType) bool { return bt.Name == "dev.tiny" || bt.Name == "dev.ded" }
+
 func cruiseControlResources(bt BrokerType) engine.Resources {
-	if bt.Name == "dev.tiny" {
+	if isDev(bt) {
 		return engine.Resources{CPURequestMilli: 100, CPULimitMilli: 500, MemoryMiB: 768}
 	}
 	return engine.Resources{CPURequestMilli: 250, CPULimitMilli: 1000, MemoryMiB: 1536}
 }
 
 func entityOperatorResources(bt BrokerType) engine.Resources {
-	if bt.Name == "dev.tiny" {
+	if isDev(bt) {
 		return engine.Resources{CPURequestMilli: 50, CPULimitMilli: 500, MemoryMiB: 384}
 	}
 	return engine.Resources{CPURequestMilli: 100, CPULimitMilli: 500, MemoryMiB: 384}

@@ -68,6 +68,18 @@ type PodGroup struct {
 	PerPod    Resources   `json:"perPod"`
 	Zones     int         `json:"zones"` // spread evenly across this many zones (maxSkew 1)
 	Exclusive Exclusivity `json:"exclusive"`
+	// InstanceType selects the node shape for dedicated groups (one pod per node).
+	InstanceType string `json:"instanceType,omitempty"`
+}
+
+// SpreadReplicas assigns replica i to zones[i%len(zones)] and returns the count per zone.
+// The allocator and the engines both use it so that capacity accounting and node pools agree.
+func SpreadReplicas(replicas int, zones []string) map[string]int {
+	out := map[string]int{}
+	for i := 0; i < replicas && len(zones) > 0; i++ {
+		out[zones[i%len(zones)]]++
+	}
+	return out
 }
 
 // PlacementRequest is what an engine asks the capacity allocator for.
@@ -80,6 +92,8 @@ type Assignment struct {
 	CellID string `json:"cellId"`
 	// Zones lists the zone names used, in order; replica i of a group goes to Zones[i % len].
 	Zones []string `json:"zones"`
+	// GroupZones lists, per pod group name, the zones that group was placed in.
+	GroupZones map[string][]string `json:"groupZones,omitempty"`
 	// OperatorShard is the operator shard label value chosen for this resource.
 	OperatorShard int `json:"operatorShard"`
 }
@@ -99,12 +113,48 @@ type CellEnv struct {
 	LabelPrefix    string            `json:"labelPrefix"`
 	EngineImages   map[string]string `json:"engineImages,omitempty"`
 	OperatorShards int               `json:"operatorShards"`
+	// DedicatedSurge is the number of extra nodes a dedicated pool may temporarily hold during rotation.
+	DedicatedSurge int `json:"dedicatedSurge,omitempty"`
+}
+
+// Taint is a node taint.
+type Taint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect"`
+}
+
+// NodePoolSpec asks the cell's node pool provider for nodes reserved for one resource.
+type NodePoolSpec struct {
+	ID           string            `json:"id"`
+	Owner        string            `json:"owner"` // resource ID the nodes are reserved for
+	InstanceType string            `json:"instanceType"`
+	NodesPerZone map[string]int    `json:"nodesPerZone"`
+	Surge        int               `json:"surge,omitempty"` // extra nodes allowed during rotation
+	Labels       map[string]string `json:"labels"`
+	Taints       []Taint           `json:"taints"`
+}
+
+// TotalNodes is the number of steady-state nodes in the pool.
+func (n NodePoolSpec) TotalNodes() int {
+	t := 0
+	for _, c := range n.NodesPerZone {
+		t += c
+	}
+	return t
 }
 
 // Bundle is the complete rendered desired state of one resource in one cell.
 // Objects are applied in slice order and deleted in reverse order.
 type Bundle struct {
 	Objects []*unstructured.Unstructured `json:"objects"`
+	// NodePools are provisioned before Objects are applied and released, after all
+	// pods are gone, when the resource is deleted.
+	NodePools []NodePoolSpec `json:"nodePools,omitempty"`
+	// DeleteGraceSeconds, if > 0, is the termination grace the agent gives the
+	// resource's pods when it is deleted (the data is being destroyed anyway, so
+	// waiting out a long graceful shutdown only slows deletion down).
+	DeleteGraceSeconds int64 `json:"deleteGraceSeconds,omitempty"`
 	// Bounds are pre-authorised limits within which the cell agent may act
 	// locally (for example storage auto-expansion) while the control plane is down.
 	Bounds map[string]int64 `json:"bounds,omitempty"`

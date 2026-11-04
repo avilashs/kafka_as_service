@@ -9,21 +9,22 @@ import (
 	kjson "k8s.io/apimachinery/pkg/util/json"
 
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+	"github.com/avilashs/kafka_as_service/internal/platform/labels"
 )
 
-// Label keys. The prefix is fixed for now; see docs/design.md (working name).
+// Label keys; the engine-neutral ones live in the labels package.
 const (
-	LabelPrefix     = "streamcell.dev/"
-	LabelCluster    = LabelPrefix + "cluster"
-	LabelTenant     = LabelPrefix + "tenant"
-	LabelTier       = LabelPrefix + "tier"
-	LabelRole       = LabelPrefix + "role"
-	LabelPool       = LabelPrefix + "pool"
-	LabelInventory  = LabelPrefix + "inventory"
-	LabelShard      = LabelPrefix + "operator-shard"
-	LabelDedOwner   = LabelPrefix + "dedicated-owner"
-	TaintDedicated  = LabelPrefix + "dedicated"
-	TaintControl    = LabelPrefix + "control"
+	LabelPrefix     = labels.Prefix
+	LabelCluster    = labels.Cluster
+	LabelTenant     = labels.Tenant
+	LabelTier       = labels.Tier
+	LabelRole       = labels.Role
+	LabelPool       = labels.NodePool
+	LabelInventory  = labels.Inventory
+	LabelShard      = labels.Shard
+	LabelDedOwner   = labels.DedicatedOwner
+	TaintDedicated  = labels.TaintDedicated
+	TaintControl    = labels.TaintControl
 	RoleBroker      = "kafka-broker"
 	RoleController  = "kafka-controller"
 	ExternalPort    = 9094
@@ -110,7 +111,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 				"userOperator": map[string]any{
 					"resources": res(eoRes.CPURequestMilli, eoRes.CPULimitMilli, eoRes.MemoryMiB),
 				},
-				"template": map[string]any{"pod": controlPoolPod(rs.ID, "entity-operator")},
+				"template": map[string]any{"pod": controlPoolPod(rs.ID, "entity-operator", common)},
 			},
 			"cruiseControl": map[string]any{
 				"resources": res(ccRes.CPURequestMilli, ccRes.CPULimitMilli, ccRes.MemoryMiB),
@@ -118,7 +119,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 					map[string]any{"mode": "add-brokers"},
 					map[string]any{"mode": "remove-brokers"},
 				},
-				"template": map[string]any{"pod": controlPoolPod(rs.ID, "cruise-control")},
+				"template": map[string]any{"pod": controlPoolPod(rs.ID, "cruise-control", common)},
 			},
 		},
 	}
@@ -155,6 +156,19 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 			return nil, err
 		}
 		b.Objects = append(b.Objects, u)
+	}
+	b.DeleteGraceSeconds = 20
+	if rs.Tier == engine.TierDedicated {
+		zones := a.GroupZones["brokers"]
+		if len(zones) == 0 {
+			return nil, fmt.Errorf("dedicated placement has no broker zones in the assignment")
+		}
+		b.NodePools = []engine.NodePoolSpec{{
+			ID: "ded-" + rs.ID, Owner: rs.ID, InstanceType: bt.InstanceType,
+			NodesPerZone: engine.SpreadReplicas(s.BrokerCount, zones), Surge: env.DedicatedSurge,
+			Labels: map[string]string{labels.NodePool: labels.PoolDedicated, labels.DedicatedOwner: rs.ID},
+			Taints: []engine.Taint{{Key: labels.TaintDedicated, Value: rs.ID, Effect: "NoSchedule"}},
+		}}
 	}
 	if s.Storage.AutoExpand {
 		max := s.Storage.MaxSizeGiB
@@ -243,7 +257,7 @@ func hostnameAntiAffinity(selector map[string]any, allNamespaces bool) map[strin
 }
 
 func requirePool(pool string) map[string]any {
-	return requireLabel(LabelPool, pool)
+	return requireLabel(labels.NodePool, pool)
 }
 
 func requireLabel(key, value string) map[string]any {
@@ -261,7 +275,8 @@ func controlToleration() []any {
 func controllerPod(cluster string, common map[string]any) map[string]any {
 	sel := map[string]any{LabelCluster: cluster, LabelRole: RoleController}
 	return map[string]any{
-		"metadata":                      map[string]any{"labels": merge(common, map[string]any{LabelRole: RoleController})},
+		"metadata": map[string]any{"labels": merge(common, map[string]any{
+			LabelRole: RoleController, labels.RequiredPool: labels.PoolControl, labels.Exclusive: labels.ExclusivePerResource})},
 		"terminationGracePeriodSeconds": 120,
 		"affinity": map[string]any{
 			"nodeAffinity":    requirePool("control"),
@@ -272,9 +287,10 @@ func controllerPod(cluster string, common map[string]any) map[string]any {
 	}
 }
 
-func controlPoolPod(cluster, component string) map[string]any {
+func controlPoolPod(cluster, component string, common map[string]any) map[string]any {
 	return map[string]any{
-		"metadata":    map[string]any{"labels": map[string]any{LabelCluster: cluster, LabelRole: component}},
+		"metadata": map[string]any{"labels": merge(common, map[string]any{
+			LabelRole: component, labels.RequiredPool: labels.PoolControl})},
 		"affinity":    map[string]any{"nodeAffinity": requirePool("control")},
 		"tolerations": controlToleration(),
 	}
@@ -284,7 +300,8 @@ func controlPoolPod(cluster, component string) map[string]any {
 func sharedBrokerPod(cluster string, common map[string]any) map[string]any {
 	sel := map[string]any{LabelCluster: cluster, LabelRole: RoleBroker}
 	return map[string]any{
-		"metadata":                      map[string]any{"labels": merge(common, map[string]any{LabelRole: RoleBroker})},
+		"metadata": map[string]any{"labels": merge(common, map[string]any{
+			LabelRole: RoleBroker, labels.RequiredPool: labels.PoolShared, labels.Exclusive: labels.ExclusivePerResource})},
 		"terminationGracePeriodSeconds": 300,
 		"affinity": map[string]any{
 			"nodeAffinity":    requirePool("shared"),
@@ -297,7 +314,8 @@ func sharedBrokerPod(cluster string, common map[string]any) map[string]any {
 // dedicatedBrokerPod: own node pool, own taint, and no other Kafka broker of any tenant on the node.
 func dedicatedBrokerPod(cluster string, common map[string]any) map[string]any {
 	return map[string]any{
-		"metadata":                      map[string]any{"labels": merge(common, map[string]any{LabelRole: RoleBroker})},
+		"metadata": map[string]any{"labels": merge(common, map[string]any{
+			LabelRole: RoleBroker, labels.RequiredPool: labels.PoolDedicated, labels.Exclusive: labels.ExclusiveWholeNode})},
 		"terminationGracePeriodSeconds": 300,
 		"affinity": map[string]any{
 			"nodeAffinity":    requireLabel(LabelDedOwner, cluster),

@@ -110,7 +110,7 @@ func TestRequestValidation(t *testing.T) {
 		{"no idempotency key", "", good, true, http.StatusBadRequest},
 		{"unknown field", "k", `{"name":"a","tier":"shared","spec":{},"x":1}`, true, http.StatusBadRequest},
 		{"bad tier", "k", strings.Replace(good, "shared", "gold", 1), true, http.StatusUnprocessableEntity},
-		{"dedicated not yet", "k", strings.Replace(good, "shared", "dedicated", 1), true, http.StatusUnprocessableEntity},
+		{"dedicated tier with a shared broker type", "k", strings.Replace(good, "shared", "dedicated", 1), true, http.StatusUnprocessableEntity},
 		{"bad version", "k", strings.Replace(good, "4.3.1", "2.8.0", 1), true, http.StatusUnprocessableEntity},
 		{"forbidden config", "k", strings.Replace(good, `"storage"`, `"config":{"ssl.keystore.location":"/x"},"storage"`, 1), true, http.StatusUnprocessableEntity},
 	}

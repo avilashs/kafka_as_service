@@ -1,0 +1,150 @@
+# Pod placement policy (design §10.2, rule 5). Evaluated by the kube-apiserver for every
+# pod created or updated in a tenant namespace (a namespace labelled streamcell.dev/inventory),
+# whatever identity submits it. It exists so that a bug in the cell agent, in an engine's
+# renderer or in an operator cannot create a pod that breaks a placement rule.
+#
+# Pair: the pods/binding webhook (deploy/admission/webhook) checks live node occupancy,
+# which CEL cannot see; the placement auditor (streamcell-audit) checks actual state.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: streamcell-pod-placement
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: lbl
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: cluster
+      expression: "'streamcell.dev/cluster' in variables.lbl ? variables.lbl['streamcell.dev/cluster'] : ''"
+    - name: role
+      expression: "'streamcell.dev/role' in variables.lbl ? variables.lbl['streamcell.dev/role'] : ''"
+    - name: reqPool
+      expression: "'streamcell.dev/required-pool' in variables.lbl ? variables.lbl['streamcell.dev/required-pool'] : ''"
+    - name: excl
+      expression: "'streamcell.dev/exclusive' in variables.lbl ? variables.lbl['streamcell.dev/exclusive'] : ''"
+    # The node label the pod must require: the pool kind, or for dedicated pods the owner.
+    - name: poolKey
+      expression: "variables.reqPool == 'dedicated' ? 'streamcell.dev/dedicated-owner' : 'streamcell.dev/pool'"
+    - name: poolValue
+      expression: "variables.reqPool == 'dedicated' ? variables.cluster : variables.reqPool"
+    - name: nodeTerms
+      expression: |-
+        has(object.spec.affinity) && has(object.spec.affinity.nodeAffinity) &&
+        has(object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution)
+          ? object.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms
+          : []
+    - name: antiTerms
+      expression: |-
+        has(object.spec.affinity) && has(object.spec.affinity.podAntiAffinity) &&
+        has(object.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution)
+          ? object.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution
+          : []
+    - name: spreadSelector
+      expression: "{'streamcell.dev/cluster': variables.cluster, 'streamcell.dev/role': variables.role}"
+  validations:
+    - expression: |-
+        variables.cluster != '' && variables.role != '' &&
+        variables.reqPool in ['shared', 'dedicated', 'control'] &&
+        object.metadata.namespace == variables.cluster
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [labels]: pods in a tenant namespace must carry
+        streamcell.dev/cluster (equal to the namespace), streamcell.dev/role and
+        streamcell.dev/required-pool (shared, dedicated or control)
+
+    - expression: |-
+        request.operation != 'UPDATE' ||
+        ['streamcell.dev/cluster', 'streamcell.dev/role', 'streamcell.dev/required-pool', 'streamcell.dev/exclusive', 'streamcell.dev/tier'].all(k,
+          (k in oldObject.metadata.labels ? oldObject.metadata.labels[k] : '') == (k in variables.lbl ? variables.lbl[k] : ''))
+      reason: Forbidden
+      message: "streamcell placement policy [immutable-labels]: placement labels cannot be changed after creation"
+
+    - expression: "request.operation != 'CREATE' || !has(object.spec.nodeName) || object.spec.nodeName == ''"
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [node-name]: pods must not set spec.nodeName;
+        they are placed by the scheduler and checked at binding
+
+    - expression: |-
+        variables.nodeTerms.size() > 0 && variables.nodeTerms.all(term, has(term.matchExpressions) &&
+          term.matchExpressions.exists(e, e.key == variables.poolKey && e.operator == 'In' &&
+            has(e.values) && e.values == [variables.poolValue]))
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [pool]: every required node-affinity term must select the pod's pool
+        (streamcell.dev/pool In [<required-pool>], or streamcell.dev/dedicated-owner In [<cluster>] for dedicated pods)
+
+    - expression: |-
+        !has(object.spec.tolerations) || object.spec.tolerations.all(t, has(t.key) && (
+          (t.key in ['node.kubernetes.io/not-ready', 'node.kubernetes.io/unreachable'] &&
+            has(t.effect) && t.effect == 'NoExecute') ||
+          (t.key == 'streamcell.dev/dedicated' && variables.reqPool == 'dedicated' &&
+            has(t.operator) && t.operator == 'Equal' && has(t.value) && t.value == variables.cluster &&
+            has(t.effect) && t.effect == 'NoSchedule') ||
+          (t.key == 'streamcell.dev/control' && variables.reqPool == 'control')))
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [tolerations]: a pod may only tolerate its own dedicated taint
+        (streamcell.dev/dedicated=<its cluster>), the control taint if it is a control-pool pod,
+        and the standard not-ready/unreachable NoExecute taints; wildcard tolerations are forbidden
+
+    - expression: |-
+        variables.excl == '' || variables.antiTerms.exists(t,
+          t.topologyKey == 'kubernetes.io/hostname' &&
+          (!has(t.namespaces) || t.namespaces.size() == 0) &&
+          has(t.namespaceSelector) && !has(t.namespaceSelector.matchLabels) && !has(t.namespaceSelector.matchExpressions) &&
+          has(t.labelSelector) && has(t.labelSelector.matchLabels) && !has(t.labelSelector.matchExpressions) &&
+          (variables.excl == 'whole-node'
+            ? t.labelSelector.matchLabels == {'streamcell.dev/role': variables.role}
+            : t.labelSelector.matchLabels == variables.spreadSelector))
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [anti-affinity]: exclusive pods need a required pod anti-affinity term on
+        kubernetes.io/hostname with namespaceSelector {} matching the pod's role (whole-node: every pod of that
+        role in every namespace; per-resource: the same cluster and role)
+
+    - expression: |-
+        variables.excl == '' || (has(object.spec.topologySpreadConstraints) &&
+          object.spec.topologySpreadConstraints.exists(c,
+            c.topologyKey == 'topology.kubernetes.io/zone' && c.maxSkew == 1 &&
+            c.whenUnsatisfiable == 'DoNotSchedule' &&
+            has(c.labelSelector) && has(c.labelSelector.matchLabels) &&
+            c.labelSelector.matchLabels == variables.spreadSelector))
+      reason: Forbidden
+      message: >-
+        streamcell placement policy [zone-spread]: exclusive pods need a DoNotSchedule topology spread constraint
+        on topology.kubernetes.io/zone with maxSkew 1 over the pod's cluster and role
+
+    - expression: |-
+        !(has(object.spec.hostNetwork) && object.spec.hostNetwork) &&
+        !(has(object.spec.hostPID) && object.spec.hostPID) &&
+        !(has(object.spec.hostIPC) && object.spec.hostIPC) &&
+        (!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath)))
+      reason: Forbidden
+      message: "streamcell placement policy [host-access]: hostNetwork, hostPID, hostIPC and hostPath volumes are forbidden"
+
+    - expression: |-
+        (object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : [])).all(c,
+          (!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+          (!has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0)))
+      reason: Forbidden
+      message: "streamcell placement policy [privileged]: privileged containers and hostPort are forbidden"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: streamcell-pod-placement
+spec:
+  policyName: streamcell-pod-placement
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: streamcell.dev/inventory
+          operator: Exists

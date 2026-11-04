@@ -37,7 +37,6 @@ func classify(err error) error {
 	switch {
 	case errors.As(err, &ve),
 		errors.Is(err, capacity.ErrExhausted),
-		errors.Is(err, capacity.ErrUnsupported),
 		errors.Is(err, store.ErrLockLost),
 		errors.Is(err, store.ErrDigestMismatch),
 		errors.Is(err, store.ErrNotFound):
@@ -155,7 +154,10 @@ func (a *Activities) PublishTombstone(ctx context.Context, opID, clusterID strin
 	}
 	var refs *engine.Bundle
 	if live != nil {
-		refs = &engine.Bundle{}
+		refs = &engine.Bundle{DeleteGraceSeconds: live.DeleteGraceSeconds}
+		for _, np := range live.NodePools { // enough to find and release the pool
+			refs.NodePools = append(refs.NodePools, engine.NodePoolSpec{ID: np.ID, Owner: np.Owner, InstanceType: np.InstanceType})
+		}
 		for _, o := range live.Objects {
 			u := &unstructured.Unstructured{}
 			u.SetAPIVersion(o.GetAPIVersion())

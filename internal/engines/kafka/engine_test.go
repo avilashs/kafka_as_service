@@ -81,7 +81,8 @@ func TestValidate(t *testing.T) {
 
 func render(t *testing.T, tier engine.Tier, s Spec) *engine.Bundle {
 	t.Helper()
-	b, err := New().Render(spec(t, tier, s), engine.Assignment{CellID: "cell-1", Zones: env.Zones, OperatorShard: 2}, env)
+	b, err := New().Render(spec(t, tier, s), engine.Assignment{CellID: "cell-1", Zones: env.Zones,
+		GroupZones: map[string][]string{"controllers": env.Zones, "brokers": env.Zones}, OperatorShard: 2}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,6 +205,102 @@ func TestRenderDedicatedPlacement(t *testing.T) {
 	tol, _, _ := unstructured.NestedSlice(pod, "tolerations")
 	if len(tol) != 1 || tol[0].(map[string]any)["key"] != TaintDedicated || tol[0].(map[string]any)["value"] != "kc-0123456789" {
 		t.Errorf("dedicated toleration must be for own taint only: %v", tol)
+	}
+}
+
+func TestRenderPlacementLabelsAndNodePool(t *testing.T) {
+	// Shared: pods carry the engine-neutral placement labels, and no node pool is requested.
+	sb := render(t, engine.TierShared, okSpec())
+	if len(sb.NodePools) != 0 {
+		t.Fatalf("shared tier must not request node pools: %+v", sb.NodePools)
+	}
+	want := map[string]map[string]string{
+		"brokers":     {"streamcell.dev/required-pool": "shared", "streamcell.dev/exclusive": "per-resource", "streamcell.dev/role": RoleBroker},
+		"controllers": {"streamcell.dev/required-pool": "control", "streamcell.dev/exclusive": "per-resource", "streamcell.dev/role": RoleController},
+	}
+	for pool, labels := range want {
+		got, _, _ := unstructured.NestedStringMap(podTemplate(t, sb, pool), "metadata", "labels")
+		for k, v := range labels {
+			if got[k] != v {
+				t.Errorf("shared %s pod label %s = %q, want %q", pool, k, got[k], v)
+			}
+		}
+	}
+	if sb.DeleteGraceSeconds != 20 {
+		t.Errorf("DeleteGraceSeconds = %d", sb.DeleteGraceSeconds)
+	}
+
+	// Dedicated: one node per broker, labelled and tainted for this cluster alone.
+	s := okSpec()
+	s.BrokerType, s.BrokerCount, s.Storage = "d.xlarge", 6, StorageSpec{SizeGiB: 1000}
+	db := render(t, engine.TierDedicated, s)
+	if len(db.NodePools) != 1 {
+		t.Fatalf("want 1 node pool, got %+v", db.NodePools)
+	}
+	np := db.NodePools[0]
+	if np.ID != "ded-kc-0123456789" || np.Owner != "kc-0123456789" || np.InstanceType != "m7i.xlarge" || np.TotalNodes() != 6 {
+		t.Errorf("node pool = %+v", np)
+	}
+	for _, z := range env.Zones {
+		if np.NodesPerZone[z] != 2 {
+			t.Errorf("zone %s has %d nodes, want 2", z, np.NodesPerZone[z])
+		}
+	}
+	if np.Labels["streamcell.dev/dedicated-owner"] != "kc-0123456789" || np.Labels["streamcell.dev/pool"] != "dedicated" {
+		t.Errorf("node labels = %v", np.Labels)
+	}
+	if len(np.Taints) != 1 || np.Taints[0].Key != "streamcell.dev/dedicated" || np.Taints[0].Value != "kc-0123456789" || np.Taints[0].Effect != "NoSchedule" {
+		t.Errorf("taints = %+v", np.Taints)
+	}
+	got, _, _ := unstructured.NestedStringMap(podTemplate(t, db, "brokers"), "metadata", "labels")
+	if got["streamcell.dev/required-pool"] != "dedicated" || got["streamcell.dev/exclusive"] != "whole-node" {
+		t.Errorf("dedicated broker labels = %v", got)
+	}
+}
+
+func TestPlanPlacementDedicated(t *testing.T) {
+	s := okSpec()
+	s.BrokerType, s.BrokerCount, s.Storage = "d.2xlarge", 3, StorageSpec{SizeGiB: 500}
+	req, err := New().PlanPlacement(spec(t, engine.TierDedicated, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := req.Groups[len(req.Groups)-1]
+	if b.Name != "brokers" || b.Pool != engine.PoolDedicated || b.Exclusive != engine.ExclusiveWholeNode || b.InstanceType != "m7i.2xlarge" || b.Replicas != 3 {
+		t.Fatalf("dedicated broker group = %+v", b)
+	}
+	if b.PerPod.CPURequestMilli != b.PerPod.CPULimitMilli {
+		t.Errorf("dedicated pods must be Guaranteed: %+v", b.PerPod)
+	}
+}
+
+// Every pod the engine can create must carry the placement labels the admission policy requires.
+// (Found by the e2e admission suite: Cruise Control and the Entity Operator were missing one.)
+func TestEveryRenderedPodTemplateHasPlacementLabels(t *testing.T) {
+	for _, tier := range []engine.Tier{engine.TierShared, engine.TierDedicated} {
+		sp := okSpec()
+		if tier == engine.TierDedicated {
+			sp.BrokerType, sp.Storage = "d.xlarge", StorageSpec{SizeGiB: 1000}
+		}
+		b := render(t, tier, sp)
+		k := find(b, "Kafka", "kc-0123456789")
+		var templates []map[string]any
+		for _, path := range [][]string{{"spec", "cruiseControl", "template", "pod"}, {"spec", "entityOperator", "template", "pod"}} {
+			m, _, _ := unstructured.NestedMap(k.Object, path...)
+			templates = append(templates, m)
+		}
+		templates = append(templates, podTemplate(t, b, "brokers"), podTemplate(t, b, "controllers"))
+		for i, tmpl := range templates {
+			l, _, _ := unstructured.NestedStringMap(tmpl, "metadata", "labels")
+			for _, key := range []string{"streamcell.dev/cluster", "streamcell.dev/role", "streamcell.dev/required-pool", "streamcell.dev/tenant", "streamcell.dev/tier"} {
+				if l[key] == "" {
+					t.Errorf("%s template %d is missing label %s: %v", tier, i, key, l)
+				}
+			}
+			if l["streamcell.dev/cluster"] != "kc-0123456789" {
+				t.Errorf("%s template %d cluster label = %q", tier, i, l["streamcell.dev/cluster"])
+			}
+		}
 	}
 }
 

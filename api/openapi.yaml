@@ -160,7 +160,7 @@ components:
       properties:
         name: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$' }
         engine: { type: string, enum: [kafka], default: kafka }
-        tier: { type: string, enum: [shared, dedicated], description: 'dedicated returns 422 until M2' }
+        tier: { type: string, enum: [shared, dedicated], description: 'dedicated reserves whole nodes (one broker per node)' }
         spec: { $ref: '#/components/schemas/KafkaSpec' }
     KafkaSpec:
       type: object
@@ -170,7 +170,7 @@ components:
         kafkaVersion: { type: string, enum: ['4.3.0', '4.3.1'] }
         brokerType:
           type: string
-          enum: [s.small, s.medium, s.large, d.xlarge, d.2xlarge, d.4xlarge, d.8xlarge, d.nvme.2xlarge, d.nvme.4xlarge, dev.tiny]
+          enum: [s.small, s.medium, s.large, d.xlarge, d.2xlarge, d.4xlarge, d.8xlarge, d.nvme.2xlarge, d.nvme.4xlarge, dev.tiny, dev.ded]
         brokerCount: { type: integer, minimum: 3, maximum: 48, multipleOf: 3 }
         storage:
           type: object
