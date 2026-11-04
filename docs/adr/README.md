@@ -21,3 +21,4 @@ Each record has a status: Proposed, Accepted, Superseded or Deprecated. Every AD
 | [0015](0015-languages.md) | Go for platform services, Java only for broker plugins |
 | [0016](0016-controllers-on-control-pool.md) | KRaft controllers on the provider control pool in both tiers |
 | [0017](0017-metering-idempotency.md) | Idempotent metering with deterministic record IDs |
+| [0018](0018-mtls-client-certificates.md) | Certificate-authenticated clients: the cell signs a CSR, the key stays with the tenant |
