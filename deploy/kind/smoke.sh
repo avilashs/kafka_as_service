@@ -38,10 +38,25 @@ create_cluster() { # json body -> "op-id cluster-id"
   echo "$(jq -r .id <<<"$resp") $(jq -r .clusterId <<<"$resp")"
 }
 
+# While a delete runs, print what is holding the namespace every 20 s. Delete time was an open
+# finding from M1 (373 s) and M2 (dedicated 171 s, shared 427 s); this shows what the time is spent on.
+delete_timeline() { # cluster-id start-seconds
+  while true; do
+    sleep 20
+    echo "  [delete +$((SECONDS - $2))s] namespace: $(kubectl get ns "$1" -o json 2>/dev/null | jq -c '[.status.conditions[]? | select(.status=="True") | .type + ": " + (.message // "")]')"
+    kubectl -n "$1" get pods -o json 2>/dev/null | jq -r '.items[] | "    pod " + .metadata.name + " gracePeriod=" + ((.metadata.deletionGracePeriodSeconds // "none") | tostring) + " deleting=" + ((.metadata.deletionTimestamp != null) | tostring) + " owner=" + ((.metadata.ownerReferences[0].kind) // "none")' 2>/dev/null || true
+    kubectl -n "$1" get pvc,strimzipodset --no-headers 2>/dev/null | sed 's/^/    /' || true
+  done
+}
+
 delete_cluster() { # cluster-id -> waits, prints how long it took
-  local start=$SECONDS dop
+  local start=$SECONDS dop sampler
   dop=$(curl -sf -X DELETE "$API/v1/clusters/$1" -H "$AUTH" -H "Idempotency-Key: smoke-del-$1" | jq -r .id)
+  delete_timeline "$1" "$start" &
+  sampler=$!
   wait_op "$dop" 900
+  kill "$sampler" 2>/dev/null || true
+  wait "$sampler" 2>/dev/null || true
   echo "  deleted in $((SECONDS - start))s"
   ! kubectl get namespace "$1" >/dev/null 2>&1 || fail "namespace $1 still exists after delete"
 }
