@@ -8,7 +8,9 @@ The project licence is **Apache-2.0**. Every dependency must meet three rules:
 
 We also take no images from Bitnami: its free versioned images were withdrawn in Aug–Sep 2025.
 
-Versions are the latest upstream tags as of 2026-11-04 (see [`upstream-check.md`](upstream-check.md)). Exact pins are set in M1 and recorded here.
+**Pinned in M1:** Go 1.26.0 toolchain, Temporal Go SDK v1.50.0, pgx v5.12.0, goose v3.29.0, client-go/api/apimachinery v0.34.1, controller-runtime v0.22.3, kin-openapi v0.152.0, Strimzi 1.3.0 (vendored), Envoy Gateway v1.9.3, kind v0.30.0 with `kindest/node:v1.34.0`. See `go.mod` for the full list.
+
+Versions below are the latest upstream tags as of 2026-11-04 (see [`upstream-check.md`](upstream-check.md)). Exact pins are set in M1 and recorded here.
 
 Status values:
 - *planned*: adopted in the design, not yet pinned.
@@ -58,10 +60,12 @@ Status values:
 | Go standard library (incl. `log/slog`, `net/http`) | BSD-3-Clause | — |
 | `go.temporal.io/sdk` | MIT | Workflows |
 | `github.com/jackc/pgx/v5` | MIT | Postgres driver |
-| `sqlc` (codegen) | MIT | Typed queries |
-| `github.com/pressly/goose/v3` | MIT | Migrations |
-| `github.com/oapi-codegen/oapi-codegen` | Apache-2.0 | OpenAPI server and client codegen |
-| `github.com/go-chi/chi/v5` | MIT | HTTP router |
+| `github.com/pressly/goose/v3` | MIT | Migrations (embedded) |
+| `github.com/getkin/kin-openapi` | MIT | OpenAPI validation in tests |
+| `github.com/google/uuid` | BSD-3-Clause | Operation and reservation IDs |
+| `go.temporal.io/api` | MIT | Temporal API types (error classification) |
+| `sigs.k8s.io/controller-runtime/pkg/envtest` | Apache-2.0 | Real kube-apiserver and etcd in e2e tests |
+| `sqlc`, `oapi-codegen`, `chi` | MIT / Apache-2.0 / MIT | Planned, **not used in M1**: queries and handlers are hand-written; the stdlib `net/http` router is used |
 | `k8s.io/client-go`, `sigs.k8s.io/controller-runtime` | Apache-2.0 | Agent, auditor, webhook |
 | `github.com/twmb/franz-go` | BSD-3-Clause | Canary, probes, test verifier |
 | `github.com/prometheus/client_golang` | Apache-2.0 | Metrics |
@@ -83,6 +87,9 @@ Status values:
 | OpenTofu | MPL-2.0 | Cell infrastructure (**not** Terraform, which is BSL 1.1) |
 | `hashicorp/aws` provider | MPL-2.0 | Used from OpenTofu |
 | kind | Apache-2.0 | Local cells |
+| envtest binaries (kube-apiserver, etcd) 1.34.1 | Apache-2.0 | e2e tests (downloaded, checksum-verified, by `hack/e2e-deps.sh`) |
+| Temporal CLI 1.10.0 (dev server) | MIT | e2e tests and local control plane |
+| Helm | Apache-2.0 | Installs Envoy Gateway in the kind cell |
 | Chainsaw (Kyverno) | Apache-2.0 | Kubernetes e2e tests |
 | OpenMessaging Benchmark | Apache-2.0 | M6 benchmarks |
 | cosign, syft | Apache-2.0 | Image signing, SBOM |

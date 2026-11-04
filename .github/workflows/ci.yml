@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: make fmt-check vet test
+
+  e2e-envtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: make e2e
+
+  kind-real-strimzi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Install kind
+        run: |
+          curl -sSfLo /usr/local/bin/kind https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64
+          chmod +x /usr/local/bin/kind
+      - run: make kind-up
+      - run: make kind-smoke
+      - name: Diagnostics
+        if: failure()
+        run: |
+          free -m || true
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl get kafka,kafkanodepool -A -o yaml || true
+          kubectl get tlsroute,gateway -A -o yaml | head -200 || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -80 || true
+          kubectl -n streamcell-operators logs deploy/strimzi-cluster-operator --tail=300 || true
+          for f in .cache/kind/*.log; do echo "== $f"; tail -100 "$f"; done
+      - if: always()
+        run: make kind-down

@@ -1,0 +1,29 @@
+# Shared-tier gateway: TLS passthrough, SNI routing to Strimzi tlsroute listeners (ADR-0005).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: streamcell
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: streamcell-gateway
+  namespace: streamcell-gateway
+spec:
+  gatewayClassName: streamcell
+  listeners:
+    - name: kafka-tls
+      protocol: TLS
+      port: 443
+      hostname: "*.streams.example.net"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        kinds: [{ group: gateway.networking.k8s.io, kind: TLSRoute }]
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - { key: streamcell.dev/inventory, operator: Exists }

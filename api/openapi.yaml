@@ -1,0 +1,229 @@
+openapi: 3.0.3
+info:
+  title: Streamcell API
+  version: 0.1.0-m1
+  description: |
+    Tenant API for managed Apache Kafka clusters. Every mutation is asynchronous,
+    requires an `Idempotency-Key` header, and returns an `Operation`.
+    M1 scope: create, list, describe and delete shared-tier clusters; operations; bootstrap endpoints.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: http://localhost:8080
+security:
+  - bearer: []
+paths:
+  /v1/clusters:
+    post:
+      operationId: createCluster
+      summary: Create a cluster
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateClusterRequest' }
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+    get:
+      operationId: listClusters
+      summary: List clusters
+      responses:
+        '200':
+          description: Clusters owned by the caller's tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [clusters]
+                properties:
+                  clusters:
+                    type: array
+                    items: { $ref: '#/components/schemas/Cluster' }
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+    get:
+      operationId: getCluster
+      summary: Describe a cluster
+      responses:
+        '200':
+          description: The cluster
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cluster' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: deleteCluster
+      summary: Delete a cluster
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/bootstrap-brokers:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+    get:
+      operationId: getBootstrapBrokers
+      summary: Bootstrap endpoints per authentication mechanism
+      responses:
+        '200':
+          description: Endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [clusterId, endpoints]
+                properties:
+                  clusterId: { type: string }
+                  endpoints:
+                    type: object
+                    additionalProperties: { type: string }
+                    example: { scram-sha-512: 'bootstrap.kc-1a2b3c4d5e.cell-1.streams.example.net:443' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/operations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getOperation
+      summary: Get an operation
+      responses:
+        '200':
+          description: The operation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /healthz:
+    get:
+      operationId: healthz
+      security: []
+      summary: Liveness
+      responses:
+        '204': { description: Healthy }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-chosen key, scoped to the tenant, kept 7 days. Same key and body replays the original operation; same key with a different body returns 422.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    ClusterID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^kc-[0-9a-f]{10}$' }
+  responses:
+    Operation:
+      description: Accepted; poll the operation
+      headers:
+        Idempotent-Replayed:
+          description: Present and "true" when the response replays an earlier request
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Operation' }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    CreateClusterRequest:
+      type: object
+      additionalProperties: false
+      required: [name, tier, spec]
+      properties:
+        name: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$' }
+        engine: { type: string, enum: [kafka], default: kafka }
+        tier: { type: string, enum: [shared, dedicated], description: 'dedicated returns 422 until M2' }
+        spec: { $ref: '#/components/schemas/KafkaSpec' }
+    KafkaSpec:
+      type: object
+      additionalProperties: false
+      required: [kafkaVersion, brokerType, brokerCount, storage]
+      properties:
+        kafkaVersion: { type: string, enum: ['4.3.0', '4.3.1'] }
+        brokerType:
+          type: string
+          enum: [s.small, s.medium, s.large, d.xlarge, d.2xlarge, d.4xlarge, d.8xlarge, d.nvme.2xlarge, d.nvme.4xlarge, dev.tiny]
+        brokerCount: { type: integer, minimum: 3, maximum: 48, multipleOf: 3 }
+        storage:
+          type: object
+          additionalProperties: false
+          required: [sizeGiB]
+          properties:
+            sizeGiB: { type: integer, minimum: 1 }
+            maxSizeGiB: { type: integer, minimum: 1 }
+            autoExpand: { type: boolean }
+        config:
+          type: object
+          description: Allowlisted broker configuration (see docs/design.md §15.1)
+          additionalProperties: { type: string }
+    Cluster:
+      type: object
+      required: [id, name, engine, tier, state, spec, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        engine: { type: string }
+        tier: { type: string, enum: [shared, dedicated] }
+        state: { type: string, enum: [CREATING, ACTIVE, UPDATING, DEGRADED, FAILED, DELETING] }
+        stateReason: { type: string }
+        spec: { $ref: '#/components/schemas/KafkaSpec' }
+        cellId: { type: string }
+        currentOperationId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Operation:
+      type: object
+      required: [id, clusterId, type, state, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        clusterId: { type: string }
+        type: { type: string, enum: [CreateCluster, DeleteCluster] }
+        state: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        step: { type: string }
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            retryable: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }

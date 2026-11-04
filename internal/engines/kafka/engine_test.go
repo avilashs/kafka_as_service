@@ -1,0 +1,269 @@
+package kafka
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+)
+
+func spec(t *testing.T, tier engine.Tier, s Spec) engine.ResourceSpec {
+	t.Helper()
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return engine.ResourceSpec{ID: "kc-0123456789", Name: "orders", Tenant: "tenant-a", Engine: Name, Tier: tier, Spec: raw}
+}
+
+func okSpec() Spec {
+	return Spec{KafkaVersion: "4.3.1", BrokerType: "s.small", BrokerCount: 3, Storage: StorageSpec{SizeGiB: 100, MaxSizeGiB: 500, AutoExpand: true}}
+}
+
+var env = engine.CellEnv{CellID: "cell-1", Domain: "streams.example.net", Zones: []string{"a", "b", "c"},
+	StorageClass: "gp3", GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", APIServerCIDRs: []string{"10.0.0.1/32"}}
+
+func TestValidate(t *testing.T) {
+	e := New()
+	cases := []struct {
+		name    string
+		tier    engine.Tier
+		mut     func(*Spec)
+		wantErr string
+	}{
+		{"ok", engine.TierShared, func(*Spec) {}, ""},
+		{"bad version", engine.TierShared, func(s *Spec) { s.KafkaVersion = "3.9.0" }, "not supported"},
+		{"unknown type", engine.TierShared, func(s *Spec) { s.BrokerType = "m5.large" }, "unknown brokerType"},
+		{"tier mismatch", engine.TierShared, func(s *Spec) { s.BrokerType = "d.xlarge"; s.Storage.SizeGiB = 200 }, "belongs to tier"},
+		{"count not multiple of 3", engine.TierShared, func(s *Spec) { s.BrokerCount = 4 }, "multiple of 3"},
+		{"too small storage", engine.TierShared, func(s *Spec) { s.Storage.SizeGiB = 1 }, "storage.sizeGiB"},
+		{"max below size", engine.TierShared, func(s *Spec) { s.Storage.MaxSizeGiB = 50 }, "maxSizeGiB"},
+		{"forbidden config", engine.TierShared, func(s *Spec) { s.Config = map[string]string{"listeners": "PLAINTEXT://:9092"} }, "not customer-settable"},
+		{"plugin config", engine.TierShared, func(s *Spec) { s.Config = map[string]string{"authorizer.class.name": "x"} }, "not customer-settable"},
+		{"out of bounds", engine.TierShared, func(s *Spec) { s.Config = map[string]string{"message.max.bytes": "999999999"} }, "must be an integer"},
+		{"minisr >= rf", engine.TierShared, func(s *Spec) {
+			s.Config = map[string]string{"min.insync.replicas": "2", "default.replication.factor": "2"}
+		}, "must be lower"},
+		{"allowed config", engine.TierShared, func(s *Spec) { s.Config = map[string]string{"log.retention.hours": "72", "compression.type": "zstd"} }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := okSpec()
+			tc.mut(&s)
+			err := e.Validate(spec(t, tc.tier, s), nil)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+	t.Run("unknown spec field", func(t *testing.T) {
+		rs := spec(t, engine.TierShared, okSpec())
+		rs.Spec = json.RawMessage(`{"kafkaVersion":"4.3.1","brokerType":"s.small","brokerCount":3,"storage":{"sizeGiB":100},"listeners":[]}`)
+		if err := e.Validate(rs, nil); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("want unknown field error, got %v", err)
+		}
+	})
+	t.Run("no shrink", func(t *testing.T) {
+		prior := spec(t, engine.TierShared, okSpec())
+		s := okSpec()
+		s.Storage.SizeGiB = 50
+		if err := e.Validate(spec(t, engine.TierShared, s), &prior); err == nil || !strings.Contains(err.Error(), "cannot shrink") {
+			t.Fatalf("want shrink error, got %v", err)
+		}
+	})
+}
+
+func render(t *testing.T, tier engine.Tier, s Spec) *engine.Bundle {
+	t.Helper()
+	b, err := New().Render(spec(t, tier, s), engine.Assignment{CellID: "cell-1", Zones: env.Zones, OperatorShard: 2}, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func find(b *engine.Bundle, kind, name string) *unstructured.Unstructured {
+	for _, o := range b.Objects {
+		if o.GetKind() == kind && o.GetName() == name {
+			return o
+		}
+	}
+	return nil
+}
+
+func TestRenderDeterministic(t *testing.T) {
+	a, _ := json.Marshal(render(t, engine.TierShared, okSpec()))
+	for i := 0; i < 20; i++ {
+		b, _ := json.Marshal(render(t, engine.TierShared, okSpec()))
+		if string(a) != string(b) {
+			t.Fatal("render is not deterministic")
+		}
+	}
+}
+
+func TestRenderObjectsAndLabels(t *testing.T) {
+	b := render(t, engine.TierShared, okSpec())
+	want := []string{"Namespace/kc-0123456789", "NetworkPolicy/default-deny", "NetworkPolicy/allow-same-namespace",
+		"NetworkPolicy/allow-dns-egress", "NetworkPolicy/allow-gateway-ingress", "NetworkPolicy/allow-apiserver-egress",
+		"Kafka/kc-0123456789", "KafkaNodePool/controllers", "KafkaNodePool/brokers"}
+	var got []string
+	for _, o := range b.Objects {
+		got = append(got, o.GetKind()+"/"+o.GetName())
+		if o.GetLabels()[LabelInventory] != "kc-0123456789" || o.GetLabels()[LabelTenant] != "tenant-a" {
+			t.Errorf("%s/%s missing inventory/tenant labels: %v", o.GetKind(), o.GetName(), o.GetLabels())
+		}
+		if o.GetKind() != "Namespace" && o.GetNamespace() != "kc-0123456789" {
+			t.Errorf("%s/%s in namespace %q", o.GetKind(), o.GetName(), o.GetNamespace())
+		}
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("objects:\n got %v\nwant %v", got, want)
+	}
+	k := find(b, "Kafka", "kc-0123456789")
+	if v, _, _ := unstructured.NestedString(k.Object, "metadata", "labels", LabelShard); v != "2" {
+		t.Errorf("operator shard label = %q, want 2", v)
+	}
+	if v, _, _ := unstructured.NestedInt64(k.Object, "spec", "kafka", "template", "podDisruptionBudget", "maxUnavailable"); v != 0 {
+		t.Errorf("PDB maxUnavailable = %d, want 0 (Drain Cleaner)", v)
+	}
+	cfg, _, _ := unstructured.NestedMap(k.Object, "spec", "kafka", "config")
+	if cfg["min.insync.replicas"] != int64(2) || cfg["default.replication.factor"] != int64(3) {
+		t.Errorf("replication defaults wrong: %v", cfg)
+	}
+	if b.Bounds["storage.brokers.maxGiB"] != 500 {
+		t.Errorf("bounds = %v", b.Bounds)
+	}
+}
+
+func podTemplate(t *testing.T, b *engine.Bundle, pool string) map[string]any {
+	t.Helper()
+	np := find(b, "KafkaNodePool", pool)
+	if np == nil {
+		t.Fatalf("no node pool %s", pool)
+	}
+	p, _, _ := unstructured.NestedMap(np.Object, "spec", "template", "pod")
+	return p
+}
+
+func antiAffinityTerm(t *testing.T, pod map[string]any) map[string]any {
+	t.Helper()
+	terms, _, _ := unstructured.NestedSlice(pod, "affinity", "podAntiAffinity", "requiredDuringSchedulingIgnoredDuringExecution")
+	if len(terms) != 1 {
+		t.Fatalf("want 1 required anti-affinity term, got %d", len(terms))
+	}
+	return terms[0].(map[string]any)
+}
+
+func TestRenderSharedPlacement(t *testing.T) {
+	b := render(t, engine.TierShared, okSpec())
+	pod := podTemplate(t, b, "brokers")
+	term := antiAffinityTerm(t, pod)
+	if term["topologyKey"] != "kubernetes.io/hostname" {
+		t.Errorf("topologyKey = %v", term["topologyKey"])
+	}
+	sel, _, _ := unstructured.NestedStringMap(term, "labelSelector", "matchLabels")
+	if sel[LabelCluster] != "kc-0123456789" || sel[LabelRole] != RoleBroker {
+		t.Errorf("shared anti-affinity must target this cluster's brokers, got %v", sel)
+	}
+	if _, ok := term["namespaceSelector"]; !ok {
+		t.Errorf("anti-affinity must set namespaceSelector")
+	}
+	if _, ok := pod["tolerations"]; ok {
+		t.Errorf("shared brokers must not tolerate any taint: %v", pod["tolerations"])
+	}
+	vals, _, _ := unstructured.NestedSlice(pod, "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms")
+	expr := vals[0].(map[string]any)["matchExpressions"].([]any)[0].(map[string]any)
+	if expr["key"] != LabelPool || expr["values"].([]any)[0] != "shared" {
+		t.Errorf("shared brokers must select the shared pool, got %v", expr)
+	}
+	tsc, _, _ := unstructured.NestedSlice(pod, "topologySpreadConstraints")
+	if len(tsc) != 1 || tsc[0].(map[string]any)["topologyKey"] != "topology.kubernetes.io/zone" || tsc[0].(map[string]any)["whenUnsatisfiable"] != "DoNotSchedule" {
+		t.Errorf("zone spread wrong: %v", tsc)
+	}
+}
+
+func TestRenderDedicatedPlacement(t *testing.T) {
+	s := okSpec()
+	s.BrokerType, s.Storage = "d.xlarge", StorageSpec{SizeGiB: 1000}
+	b := render(t, engine.TierDedicated, s)
+	pod := podTemplate(t, b, "brokers")
+	term := antiAffinityTerm(t, pod)
+	sel, _, _ := unstructured.NestedStringMap(term, "labelSelector", "matchLabels")
+	if len(sel) != 1 || sel[LabelRole] != RoleBroker {
+		t.Errorf("dedicated anti-affinity must match ALL brokers, got %v", sel)
+	}
+	if ns, ok := term["namespaceSelector"].(map[string]any); !ok || len(ns) != 0 {
+		t.Errorf("dedicated anti-affinity needs namespaceSelector: {}, got %v", term["namespaceSelector"])
+	}
+	tol, _, _ := unstructured.NestedSlice(pod, "tolerations")
+	if len(tol) != 1 || tol[0].(map[string]any)["key"] != TaintDedicated || tol[0].(map[string]any)["value"] != "kc-0123456789" {
+		t.Errorf("dedicated toleration must be for own taint only: %v", tol)
+	}
+}
+
+func TestRenderControllersOnControlPool(t *testing.T) {
+	b := render(t, engine.TierShared, okSpec())
+	pod := podTemplate(t, b, "controllers")
+	tol, _, _ := unstructured.NestedSlice(pod, "tolerations")
+	if len(tol) != 1 || tol[0].(map[string]any)["key"] != TaintControl {
+		t.Errorf("controllers must tolerate only the control taint: %v", tol)
+	}
+	sel, _, _ := unstructured.NestedStringMap(antiAffinityTerm(t, pod), "labelSelector", "matchLabels")
+	if sel[LabelRole] != RoleController || sel[LabelCluster] != "kc-0123456789" {
+		t.Errorf("controller anti-affinity wrong: %v", sel)
+	}
+	np := find(b, "KafkaNodePool", "controllers")
+	roles, _, _ := unstructured.NestedStringSlice(np.Object, "spec", "roles")
+	if len(roles) != 1 || roles[0] != "controller" {
+		t.Errorf("controller pool roles = %v", roles)
+	}
+}
+
+func TestPlanPlacement(t *testing.T) {
+	req, err := New().PlanPlacement(spec(t, engine.TierShared, okSpec()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Groups) != 3 || req.Groups[2].Replicas != 3 || req.Groups[2].Pool != engine.PoolShared ||
+		req.Groups[0].Pool != engine.PoolControl || req.Groups[1].Pool != engine.PoolControl {
+		t.Fatalf("unexpected placement request: %+v", req)
+	}
+	if req.Groups[2].PerPod.MemoryMiB != 6144 || req.Groups[2].PerPod.CPURequestMilli != 1000 {
+		t.Fatalf("broker demand wrong: %+v", req.Groups[2].PerPod)
+	}
+	if req.Groups[1].PerPod.MemoryMiB != 1536+384 {
+		t.Fatalf("cluster-services demand wrong: %+v", req.Groups[1].PerPod)
+	}
+}
+
+func TestObserveStatus(t *testing.T) {
+	e := New()
+	rs := spec(t, engine.TierShared, okSpec())
+	ready := json.RawMessage(`{"observedGeneration":3,"conditions":[{"type":"Ready","status":"True"}],"listeners":[{"name":"external","bootstrapServers":"bootstrap.x:443"}]}`)
+	obs := engine.Observed{Generation: 1, Objects: []engine.ObjectStatus{
+		{Kind: "Namespace", Name: "kc-0123456789", Exists: true},
+		{Kind: "Kafka", Name: "kc-0123456789", Exists: true, Generation: 3, Status: ready},
+	}}
+	st, _ := e.ObserveStatus(rs, obs)
+	if !st.Ready || st.Values["endpoint.scram-sha-512"] != "bootstrap.x:443" {
+		t.Fatalf("want ready with endpoint, got %+v", st)
+	}
+	obs.Objects[1].Generation = 4 // operator has not caught up
+	if st, _ := e.ObserveStatus(rs, obs); st.Ready {
+		t.Fatal("must not be ready when observedGeneration < generation")
+	}
+	obs.Objects[1].Generation = 3
+	obs.Objects[0].Exists = false
+	if st, _ := e.ObserveStatus(rs, obs); st.Ready {
+		t.Fatal("must not be ready when an object is missing")
+	}
+	if st, _ := e.ObserveStatus(rs, engine.Observed{Deleted: true}); !st.Deleted {
+		t.Fatal("deleted not reported")
+	}
+}

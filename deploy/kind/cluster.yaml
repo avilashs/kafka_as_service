@@ -1,0 +1,36 @@
+# Local cell: node pools are simulated with labels and taints (design §19).
+#   3 control-pool workers (zones a/b/c, taint streamcell.dev/control)
+#   3 shared-pool workers  (zones a/b/c)
+# Dedicated pools (M2) are added by labelling/tainting spare workers.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: streamcell
+nodes:
+  - role: control-plane
+  - role: worker
+    labels: { streamcell.dev/pool: control, topology.kubernetes.io/zone: zone-a }
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints: [{ key: streamcell.dev/control, value: "true", effect: NoSchedule }]
+  - role: worker
+    labels: { streamcell.dev/pool: control, topology.kubernetes.io/zone: zone-b }
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints: [{ key: streamcell.dev/control, value: "true", effect: NoSchedule }]
+  - role: worker
+    labels: { streamcell.dev/pool: control, topology.kubernetes.io/zone: zone-c }
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints: [{ key: streamcell.dev/control, value: "true", effect: NoSchedule }]
+  - role: worker
+    labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-a }
+  - role: worker
+    labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-b }
+  - role: worker
+    labels: { streamcell.dev/pool: shared, topology.kubernetes.io/zone: zone-c }
