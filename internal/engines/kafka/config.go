@@ -54,6 +54,9 @@ var platformConfig = map[string]any{
 	"transaction.state.log.min.isr":            2,
 	"replica.selector.class":                   "org.apache.kafka.common.replica.RackAwareReplicaSelector",
 	"auto.create.topics.enable":                false,
+	// Policies run on the controllers as well as the brokers (KRaft), which share this configuration.
+	"create.topic.policy.class.name": "dev.streamcell.kafka.PlatformCreateTopicPolicy",
+	"alter.config.policy.class.name": "dev.streamcell.kafka.PlatformAlterConfigPolicy",
 }
 
 // overridable lists platform defaults a customer may change within allowedConfig bounds.

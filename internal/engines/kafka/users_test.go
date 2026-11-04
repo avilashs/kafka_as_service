@@ -69,17 +69,33 @@ func TestUserValidation(t *testing.T) {
 	})
 }
 
-func TestAdminACLsNeverTouchTheBrokers(t *testing.T) {
+// The admin profile holds cluster Alter, which Kafka needs for CreateAcls/DeleteAcls and which
+// PlatformAuthorizer restricts to exactly those two requests (plugins/kafka/it/it.sh proves that against a
+// real broker). Nothing else broker-level may be in it, and tenants cannot grant Alter themselves.
+func TestAdminACLsAreBoundedAndTenantsCannotGrantAlter(t *testing.T) {
+	sawAlter := false
 	for _, a := range adminACLs() {
-		if err := validateACL(a); err != nil {
-			t.Errorf("the admin ACL set must itself be valid: %v", err)
-		}
 		if a.Resource.Type == "cluster" {
 			for _, op := range a.Operations {
-				if op == "Alter" || op == "AlterConfigs" || op == "ClusterAction" || op == "All" {
+				switch op {
+				case "Alter":
+					sawAlter = true
+				case "AlterConfigs", "ClusterAction", "All", "Create":
 					t.Errorf("admin gets cluster operation %s", op)
 				}
 			}
+			continue
+		}
+		if err := validateACL(a); err != nil {
+			t.Errorf("the admin ACL set must itself be valid: %v", err)
+		}
+	}
+	if !sawAlter {
+		t.Error("the admin profile must hold cluster Alter, or the tenant cannot manage ACLs")
+	}
+	for _, op := range []string{"Alter", "AlterConfigs", "ClusterAction", "Create", "All"} {
+		if err := validateACL(ACL{Resource: ACLResource{Type: "cluster"}, Operations: []string{op}}); err == nil {
+			t.Errorf("a tenant-defined ACL may not grant cluster %s", op)
 		}
 	}
 }

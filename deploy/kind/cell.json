@@ -22,6 +22,9 @@
       "10.96.0.1/32",
       "__APISERVER_IP__/32"
     ],
+    "engineImages": {
+      "4.3.1": "streamcell/kafka:4.3.1-dev"
+    },
     "dedicatedSurge": 0
   },
   "pools": [

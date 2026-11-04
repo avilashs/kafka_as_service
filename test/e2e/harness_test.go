@@ -245,7 +245,8 @@ func newEnv(t *testing.T) *env {
 	err := st.UpsertCell(ctx, store.CellSpec{
 		ID: e.cellID, Region: "local", Cloud: "kind", State: "ACTIVE", OperatorShards: 2, AgentToken: cellTok,
 		Env: engine.CellEnv{Domain: "streams.example.net", Zones: zones, StorageClass: "standard",
-			GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", APIServerCIDRs: []string{"10.96.0.1/32"}},
+			GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", APIServerCIDRs: []string{"10.96.0.1/32"},
+			EngineImages: map[string]string{"4.3.0": "registry.example/kafka:4.3.0", "4.3.1": "registry.example/kafka:4.3.1"}},
 		Pools: []store.PoolSpec{
 			{ID: e.cellID + "-control", Kind: "control", InstanceType: "kind", MaxNodes: 3, Zones: zc(64000, 262144, 1)},
 			{ID: e.cellID + "-shared", Kind: "shared", InstanceType: "kind", MaxNodes: 3, Zones: zc(64000, 262144, 1)},

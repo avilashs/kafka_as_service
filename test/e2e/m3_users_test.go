@@ -160,15 +160,22 @@ func TestM3UserLifecycle(t *testing.T) {
 	}
 	kr, _ := dyn.Resource(kafkaUserGVR).Namespace(id).Get(ctx, "root", metav1.GetOptions{})
 	racls, _, _ := unstructured.NestedSlice(kr.Object, "spec", "authorization", "acls")
-	for _, a := range racls { // admin must never get broker-level operations
+	sawAlter := false
+	for _, a := range racls { // admin: cluster Alter (CreateAcls, restricted by PlatformAuthorizer) but nothing else broker-level
 		m := a.(map[string]any)
 		if m["resource"].(map[string]any)["type"] == "cluster" {
 			for _, op := range m["operations"].([]any) {
-				if op == "Alter" || op == "AlterConfigs" || op == "ClusterAction" || op == "All" {
+				if op == "Alter" {
+					sawAlter = true
+				}
+				if op == "AlterConfigs" || op == "ClusterAction" || op == "All" || op == "Create" {
 					t.Errorf("admin user has cluster operation %v", op)
 				}
 			}
 		}
+	}
+	if !sawAlter {
+		t.Error("admin user lacks cluster Alter, so could not manage ACLs")
 	}
 
 	// The password exists nowhere in the database: scan every table.

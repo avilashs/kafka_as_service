@@ -50,13 +50,13 @@ var (
 )
 
 // allowedOps lists, per resource type, the operations a tenant-defined ACL may grant. In particular
-// no cluster ACL may grant Alter, AlterConfigs or ClusterAction: those would let a tenant change
-// broker configuration, reassign partitions or act as a broker (design §15.1).
+// no cluster ACL may grant Alter, AlterConfigs, ClusterAction or Create: those would let a tenant change
+// broker configuration, reassign partitions, act as a broker or create topics with reserved names (design §15.1).
 var allowedOps = map[string][]string{
 	"topic":           {"Read", "Write", "Create", "Delete", "Alter", "Describe", "DescribeConfigs", "AlterConfigs", "All"},
 	"group":           {"Read", "Delete", "Describe", "All"},
 	"transactionalId": {"Write", "Describe", "All"},
-	"cluster":         {"Describe", "DescribeConfigs", "Create", "IdempotentWrite"},
+	"cluster":         {"Describe", "DescribeConfigs", "IdempotentWrite"},
 }
 
 // adminACLs is what "admin: true" means: everything a tenant needs to run its own topics, groups and
@@ -66,7 +66,10 @@ func adminACLs() []ACL {
 		{Resource: ACLResource{Type: "topic", Name: "*", PatternType: "literal"}, Operations: []string{"All"}},
 		{Resource: ACLResource{Type: "group", Name: "*", PatternType: "literal"}, Operations: []string{"All"}},
 		{Resource: ACLResource{Type: "transactionalId", Name: "*", PatternType: "literal"}, Operations: []string{"All"}},
-		{Resource: ACLResource{Type: "cluster"}, Operations: []string{"Describe", "DescribeConfigs", "Create", "IdempotentWrite"}},
+		// Alter on the cluster is how Kafka authorizes CreateAcls/DeleteAcls. PlatformAuthorizer grants it to
+		// those two requests only and denies it for everything else (reassignment, leader election, features...).
+		// Create is NOT here: cluster-wide Create would bypass the per-topic checks; topic Create comes with "All".
+		{Resource: ACLResource{Type: "cluster"}, Operations: []string{"Alter", "Describe", "DescribeConfigs", "IdempotentWrite"}},
 	}
 }
 

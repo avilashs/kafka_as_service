@@ -29,6 +29,9 @@ const (
 	RoleController  = "kafka-controller"
 	ExternalPort    = 9094
 	InternalTLSPort = 9093
+
+	// AuthorizerClass is the platform authorizer in the derived Kafka image (plugins/kafka).
+	AuthorizerClass = "dev.streamcell.kafka.PlatformAuthorizer"
 )
 
 // Render implements engine.Engine.
@@ -102,9 +105,13 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 						},
 					},
 				},
+				// StandardAuthorizer plus the platform's hard rules (plugins/kafka). supportsAdminApi lets the
+				// User Operator manage ACLs through the Admin API, as it does with the simple authorizer.
 				"authorization": map[string]any{
-					"type":       "simple",
-					"superUsers": []any{"CN=" + rs.ID + "-entity-user-operator", "CN=" + rs.ID + "-cruise-control"},
+					"type":             "custom",
+					"authorizerClass":  AuthorizerClass,
+					"supportsAdminApi": true,
+					"superUsers":       []any{"CN=" + rs.ID + "-entity-user-operator", "CN=" + rs.ID + "-cruise-control"},
 				},
 				"rack":   map[string]any{"topologyKey": "topology.kubernetes.io/zone"},
 				"config": effectiveConfig(s.Config),
@@ -134,9 +141,13 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 			},
 		},
 	}
-	if img, ok := env.EngineImages[s.KafkaVersion]; ok && img != "" {
-		kafka["spec"].(map[string]any)["kafka"].(map[string]any)["image"] = img
+	// The plugins (authorizer, topic policies) live in a derived image. A cell without an image for the
+	// version would start brokers that cannot load the authorizer class, so refuse to render instead.
+	img := env.EngineImages[s.KafkaVersion]
+	if img == "" {
+		return nil, fmt.Errorf("cell %s has no platform Kafka image for version %s", env.CellID, s.KafkaVersion)
 	}
+	kafka["spec"].(map[string]any)["kafka"].(map[string]any)["image"] = img
 
 	controllers := nodePool(rs.ID, "controllers", common, []any{"controller"}, 3,
 		res(ct.CPURequestMilli, ct.CPULimitMilli, ct.MemoryMiB), ct.HeapMiB,

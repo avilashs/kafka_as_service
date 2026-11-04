@@ -77,7 +77,7 @@ func bundleFor(t *testing.T, clusterID string) *engine.Bundle {
 	t.Helper()
 	raw, _ := json.Marshal(kafka.Spec{KafkaVersion: "4.3.1", BrokerType: "s.small", BrokerCount: 3, Storage: kafka.StorageSpec{SizeGiB: 10}})
 	b, err := kafka.New().Render(engine.ResourceSpec{ID: clusterID, Name: "x", Tenant: "t", Engine: "kafka", Tier: engine.TierShared, Spec: raw},
-		engine.Assignment{CellID: "fake", Zones: []string{"a", "b", "c"}}, engine.CellEnv{CellID: "fake", Domain: "streams.example.net", GatewayName: "gw", GatewayNS: "gw-ns"})
+		engine.Assignment{CellID: "fake", Zones: []string{"a", "b", "c"}}, engine.CellEnv{CellID: "fake", Domain: "streams.example.net", GatewayName: "gw", GatewayNS: "gw-ns", EngineImages: map[string]string{"4.3.1": "registry.example/kafka:4.3.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt-check e2e-deps e2e images kind-up kind-smoke kind-down
+.PHONY: build test vet fmt-check e2e-deps e2e images kafka-plugins kafka-image plugin-it kind-up kind-smoke kind-down
 
 build:
 	go build -o bin/ ./cmd/...
@@ -18,6 +18,18 @@ images:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/linux/streamcell-admission ./cmd/streamcell-admission
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/linux/streamcell-audit ./cmd/streamcell-audit
 	docker build -f deploy/Dockerfile.cell-tools -t streamcell/cell-tools:dev .
+
+# The Kafka plugins (authorizer, topic policies), the derived Kafka image that carries them, and the
+# integration test that runs them in a real broker.
+STRIMZI_KAFKA_IMAGE ?= quay.io/strimzi/kafka:1.3.0-kafka-4.3.1
+kafka-plugins:
+	cd plugins/kafka && mvn -q -B package
+
+kafka-image: kafka-plugins
+	docker build -f deploy/images/kafka/Dockerfile --build-arg BASE=$(STRIMZI_KAFKA_IMAGE) -t streamcell/kafka:4.3.1-dev .
+
+plugin-it: kafka-plugins
+	KAFKA_IMAGE=$(STRIMZI_KAFKA_IMAGE) plugins/kafka/it/it.sh
 
 # Postgres (docker), Temporal dev server, envtest binaries.
 e2e-deps:

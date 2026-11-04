@@ -24,7 +24,8 @@ func okSpec() Spec {
 }
 
 var env = engine.CellEnv{CellID: "cell-1", Domain: "streams.example.net", Zones: []string{"a", "b", "c"},
-	StorageClass: "gp3", GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", GatewayDataPlaneNS: "envoy-gateway-system", APIServerCIDRs: []string{"10.0.0.1/32"}}
+	StorageClass: "gp3", GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", GatewayDataPlaneNS: "envoy-gateway-system",
+	EngineImages: map[string]string{"4.3.0": "registry.example/kafka:4.3.0", "4.3.1": "registry.example/kafka:4.3.1"}, APIServerCIDRs: []string{"10.0.0.1/32"}}
 
 func TestValidate(t *testing.T) {
 	e := New()
@@ -443,5 +444,37 @@ func TestListenersRestrictNetworkPeers(t *testing.T) {
 	}
 	if got := from[0].(map[string]any)["from"].([]any)[0].(map[string]any)["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]any)["kubernetes.io/metadata.name"]; got != "envoy-gateway-system" {
 		t.Errorf("allow-gateway-ingress namespace = %v", got)
+	}
+}
+
+// The authorizer and the policies come from the derived image: authorization is `custom` with the
+// platform class and the User Operator may manage ACLs; rendering without that image is refused.
+func TestAuthorizationAndPluginImage(t *testing.T) {
+	b := render(t, engine.TierShared, okSpec())
+	k := find(b, "Kafka", "kc-0123456789")
+	az, _, _ := unstructured.NestedMap(k.Object, "spec", "kafka", "authorization")
+	if az["type"] != "custom" || az["authorizerClass"] != AuthorizerClass || az["supportsAdminApi"] != true {
+		t.Errorf("authorization = %v", az)
+	}
+	supers, _ := az["superUsers"].([]any)
+	if len(supers) != 2 {
+		t.Errorf("superUsers = %v (the User Operator and Cruise Control only)", supers)
+	}
+	img, _, _ := unstructured.NestedString(k.Object, "spec", "kafka", "image")
+	if img != "registry.example/kafka:4.3.1" {
+		t.Errorf("image = %q", img)
+	}
+	cfg, _, _ := unstructured.NestedMap(k.Object, "spec", "kafka", "config")
+	for _, key := range []string{"create.topic.policy.class.name", "alter.config.policy.class.name"} {
+		if _, ok := cfg[key]; !ok {
+			t.Errorf("platform config lacks %s", key)
+		}
+	}
+	noImg := env
+	noImg.EngineImages = nil
+	_, err := New().Render(spec(t, engine.TierShared, okSpec()), engine.Assignment{CellID: "cell-1", Zones: env.Zones,
+		GroupZones: map[string][]string{"controllers": env.Zones, "brokers": env.Zones}, OperatorShard: 2}, noImg)
+	if err == nil || !strings.Contains(err.Error(), "no platform Kafka image") {
+		t.Errorf("render without an image: %v", err)
 	}
 }

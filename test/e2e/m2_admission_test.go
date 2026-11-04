@@ -27,7 +27,7 @@ func renderPods(t *testing.T, tier engine.Tier, brokerType string, clusterID str
 	zones := []string{"zone-a", "zone-b", "zone-c"}
 	b, err := kafka.New().Render(engine.ResourceSpec{ID: clusterID, Name: "x", Tenant: "t", Engine: "kafka", Tier: tier, Spec: raw},
 		engine.Assignment{CellID: "c", Zones: zones, GroupZones: map[string][]string{"controllers": zones, "brokers": zones}},
-		engine.CellEnv{CellID: "c", Domain: "d.example", GatewayName: "gw", GatewayNS: "gw-ns"})
+		engine.CellEnv{CellID: "c", Domain: "d.example", GatewayName: "gw", GatewayNS: "gw-ns", EngineImages: map[string]string{"4.3.1": "registry.example/kafka:4.3.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
