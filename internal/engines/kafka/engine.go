@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
@@ -144,9 +145,105 @@ func (e *Engine) PlanPlacement(rs engine.ResourceSpec) (engine.PlacementRequest,
 	}}, nil
 }
 
-// PlanChange implements engine.Engine. Lifecycle changes arrive in M4.
+// PlanChange implements engine.Engine. Every lifecycle change of the Kafka engine is one publish of the
+// new bundle followed by a wait for Ready: Strimzi performs the safe sequence itself (one rolling
+// restart at a time gated on minISR; auto-rebalance for scale), and ObserveStatus reports Ready only when
+// that sequence has finished (see the gates there). The platform adds the reservation before and the
+// accounting after.
 func (e *Engine) PlanChange(from, to engine.ResourceSpec, a engine.Assignment, env engine.CellEnv) ([]engine.Step, error) {
-	return nil, engine.Invalid("cluster updates are not implemented yet (milestone M4)")
+	if _, err := e.ClassifyChange(from, to); err != nil {
+		return nil, err
+	}
+	b, err := e.Render(to, a, env)
+	if err != nil {
+		return nil, err
+	}
+	return []engine.Step{{Name: "apply", Bundle: b, WaitFor: engine.Condition{Type: "Ready"}, Timeout: 45 * time.Minute}}, nil
+}
+
+var _ engine.Changer = (*Engine)(nil)
+
+// ClassifyChange implements engine.Changer.
+func (e *Engine) ClassifyChange(from, to engine.ResourceSpec) (engine.Change, error) {
+	f, err := ParseSpec(from)
+	if err != nil {
+		return engine.Change{}, err
+	}
+	t, err := ParseSpec(to)
+	if err != nil {
+		return engine.Change{}, err
+	}
+	if from.Tier != to.Tier {
+		return engine.Change{}, engine.Invalid("tier changes use the tier migration operation")
+	}
+	if !slicesEqualUsers(f.Users, t.Users) {
+		return engine.Change{}, engine.Invalid("users are changed through the user endpoints")
+	}
+	var kinds []string
+	if f.KafkaVersion != t.KafkaVersion {
+		kinds = append(kinds, "version")
+	}
+	if f.BrokerType != t.BrokerType {
+		kinds = append(kinds, "size")
+	}
+	if f.BrokerCount != t.BrokerCount {
+		kinds = append(kinds, "scale")
+	}
+	if f.Storage != t.Storage {
+		kinds = append(kinds, "storage")
+	}
+	if !mapsEqual(f.Config, t.Config) {
+		kinds = append(kinds, "config")
+	}
+	switch len(kinds) {
+	case 0:
+		return engine.Change{}, engine.Invalid("the request changes nothing")
+	case 1:
+	default:
+		return engine.Change{}, engine.Invalid("one kind of change per request; this one changes %v", kinds)
+	}
+	switch kinds[0] {
+	case "version":
+		fi, ti := slices.Index(SupportedVersions, f.KafkaVersion), slices.Index(SupportedVersions, t.KafkaVersion)
+		if fi < 0 || ti < 0 || ti < fi {
+			return engine.Change{}, engine.Invalid("kafkaVersion can only move forward (%s -> %s)", f.KafkaVersion, t.KafkaVersion)
+		}
+	case "size":
+		fb, _ := LookupBrokerType(f.BrokerType)
+		tb, _ := LookupBrokerType(t.BrokerType)
+		if fb.LocalNVMe != tb.LocalNVMe {
+			return engine.Change{}, engine.Invalid("changing between local-NVMe and network-volume broker types needs a node rotation, which is not available yet")
+		}
+		if t.Storage.SizeGiB > tb.MaxStorageGiB {
+			return engine.Change{}, engine.Invalid("the current storage (%d GiB) exceeds the maximum of %s", t.Storage.SizeGiB, tb.Name)
+		}
+	case "scale":
+		// Scale in is refused by Strimzi itself while brokers still hold partitions; the auto-rebalance
+		// empties them first. A projected-disk-use pre-check needs broker metrics (M5).
+	case "storage":
+		if t.Storage.SizeGiB < f.Storage.SizeGiB {
+			return engine.Change{}, engine.Invalid("storage cannot shrink (%d < %d GiB)", t.Storage.SizeGiB, f.Storage.SizeGiB)
+		}
+	}
+	return engine.Change{Kind: kinds[0], NeedsCapacity: kinds[0] == "size" || kinds[0] == "scale"}, nil
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || w != v {
+			return false
+		}
+	}
+	return true
+}
+
+func slicesEqualUsers(a, b []User) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return bytes.Equal(x, y)
 }
 
 // PlanDelete implements engine.Engine.
@@ -201,7 +298,10 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 		} `json:"conditions"`
 		KafkaVersion         string `json:"kafkaVersion"`
 		KafkaMetadataVersion string `json:"kafkaMetadataVersion"`
-		Listeners            []struct {
+		AutoRebalance        struct {
+			State string `json:"state"`
+		} `json:"autoRebalance"`
+		Listeners []struct {
 			Name             string `json:"name"`
 			BootstrapServers string `json:"bootstrapServers"`
 		} `json:"listeners"`
@@ -222,6 +322,27 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 	}
 	if st.ObservedGeneration < kafkaObj.Generation {
 		return engine.Status{Reason: "operator has not reconciled the latest generation", Values: vals}, nil
+	}
+	// A scale operation is finished only when Cruise Control has moved the partitions: while an
+	// auto-rebalance runs the cluster is not "Ready" for our purposes, even if Strimzi says so.
+	if s := st.AutoRebalance.State; s != "" && s != "Idle" {
+		return engine.Status{Reason: "auto-rebalance in progress: " + s, Values: vals}, nil
+	}
+	// The broker pool has the size that was asked for (covers both directions of a scale).
+	if sp, err := parseSpecJSON(rs.Spec); err == nil {
+		for i := range obs.Objects {
+			o := &obs.Objects[i]
+			if o.Kind != "KafkaNodePool" || !strings.HasSuffix(o.Name, "-brokers") && o.Name != "brokers" {
+				continue
+			}
+			var ps struct {
+				Replicas int `json:"replicas"`
+			}
+			_ = json.Unmarshal(o.Status, &ps)
+			if ps.Replicas != sp.BrokerCount {
+				return engine.Status{Reason: fmt.Sprintf("broker pool has %d of %d brokers", ps.Replicas, sp.BrokerCount), Values: vals}, nil
+			}
+		}
 	}
 	for _, c := range st.Conditions {
 		if c.Type == "Ready" {

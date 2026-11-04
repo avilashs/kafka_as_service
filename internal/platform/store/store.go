@@ -245,6 +245,18 @@ func lookupIdempotency(ctx context.Context, tx pgx.Tx, in MutationInput) (*Opera
 	return scanOp(tx.QueryRow(ctx, `SELECT `+opCols+` FROM operations WHERE id=$1`, opID))
 }
 
+// ReplayOperation returns the operation an earlier request with the same idempotency key started, or nil.
+// It lets a handler answer a replay before validating the request against state the first call changed.
+func (s *Store) ReplayOperation(ctx context.Context, in MutationInput) (*Operation, error) {
+	var op *Operation
+	err := s.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		op, err = lookupIdempotency(ctx, tx, in)
+		return err
+	})
+	return op, err
+}
+
 func insertOpAndOutbox(ctx context.Context, tx pgx.Tx, in MutationInput, opID, clusterID, opType, workflow string) (*Operation, error) {
 	if _, err := tx.Exec(ctx, `INSERT INTO operations (id, tenant_id, cluster_id, type, state, request) VALUES ($1,$2,$3,$4,'PENDING',$5)`,
 		opID, in.TenantID, clusterID, opType, []byte(in.Request)); err != nil {
@@ -431,6 +443,13 @@ func (s *Store) UpdateClusterSpec(ctx context.Context, in UpdateSpecInput) (op *
 		newSpec, err := in.Mutate(c)
 		if err != nil {
 			return err
+		}
+		// The spec before the change travels with the operation, so a change that cannot get its capacity
+		// can be undone (RevertSpec) instead of leaving an unplaceable desired state behind.
+		var reqObj map[string]json.RawMessage
+		if json.Unmarshal(in.Request, &reqObj) == nil && reqObj != nil {
+			reqObj["prior"] = c.Spec
+			in.MutationInput.Request, _ = json.Marshal(reqObj)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE clusters SET spec=$2, spec_generation=spec_generation+1, state='UPDATING',
 			lock_operation_id=$3, updated_at=now() WHERE id=$1`, in.ClusterID, []byte(newSpec), in.OpID); err != nil {

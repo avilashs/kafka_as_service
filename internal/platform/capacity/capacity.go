@@ -105,7 +105,27 @@ func (a *Allocator) candidates(ctx context.Context, tenantID string) ([]string, 
 
 var errNoFit = errors.New("does not fit")
 
+// ReserveChange reserves capacity for a changed spec of a cluster that already lives in a cell. The
+// cluster's own committed reservations are not counted against the new one (the new reservation
+// replaces them when the change succeeds), so a cluster can grow into capacity it already holds. The
+// assignment of the cluster does not change. Idempotent per operation.
+func (a *Allocator) ReserveChange(ctx context.Context, opID, clusterID, cellID string, req engine.PlacementRequest) error {
+	if existing, err := a.existing(ctx, opID); err != nil || existing != nil {
+		return err
+	}
+	_, err := a.tryCellReplacing(ctx, cellID, opID, clusterID, clusterID, req)
+	if errors.Is(err, errNoFit) {
+		return ErrExhausted
+	}
+	return err
+}
+
 func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string, req engine.PlacementRequest) (engine.Assignment, error) {
+	return a.tryCellReplacing(ctx, cellID, opID, clusterID, "", req)
+}
+
+// tryCellReplacing is tryCell where the committed reservations of cluster replace do not count as used.
+func (a *Allocator) tryCellReplacing(ctx context.Context, cellID, opID, clusterID, replace string, req engine.PlacementRequest) (engine.Assignment, error) {
 	var as engine.Assignment
 	err := a.Store.InTx(ctx, func(tx pgx.Tx) error {
 		items, zones, groupZones, err := demand(ctx, tx, cellID, req)
@@ -130,7 +150,8 @@ func (a *Allocator) tryCell(ctx context.Context, cellID, opID, clusterID string,
 			if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(i.cpu_m),0), COALESCE(sum(i.mem_mib),0), COALESCE(sum(i.ebs_mbps),0),
 					COALESCE(sum(i.attach),0), COALESCE(sum(i.nodes),0)
 				FROM reservation_items i JOIN reservations r ON r.id = i.reservation_id
-				WHERE i.pool_id=$1 AND i.zone=$2 AND r.status <> 'RELEASED'`, it.pool, it.zone).Scan(&cpuU, &memU, &ebsU, &attU, &nodesU); err != nil {
+				WHERE i.pool_id=$1 AND i.zone=$2 AND r.status <> 'RELEASED'
+				  AND NOT (r.cluster_id = $3 AND r.status = 'COMMITTED')`, it.pool, it.zone, replace).Scan(&cpuU, &memU, &ebsU, &attU, &nodesU); err != nil {
 				return err
 			}
 			if cpuU+it.cpu > cpuT || memU+it.mem > memT || ebsU+it.ebs > ebsT || attU+it.attach > attT || it.maxGroupPods > nodesT {

@@ -146,3 +146,15 @@ func TestRequestValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestMergePatch(t *testing.T) {
+	got, err := mergePatch(json.RawMessage(`{"a":1,"config":{"x":"1","y":"2"},"storage":{"sizeGiB":10}}`),
+		json.RawMessage(`{"config":{"x":null,"z":"3"},"storage":{"sizeGiB":20},"b":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"a":1,"b":2,"config":{"y":"2","z":"3"},"storage":{"sizeGiB":20}}`
+	if string(got) != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}

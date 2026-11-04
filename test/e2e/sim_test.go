@@ -60,6 +60,7 @@ func (s *opSim) run(ctx context.Context) {
 		case <-t.C:
 			s.reconcileKafkas(ctx)
 			s.reconcileUsers(ctx)
+			s.reconcileNodePools(ctx)
 			s.confirmPodTermination(ctx)
 			s.finalizeNamespaces(ctx)
 		}
@@ -145,6 +146,29 @@ func testCA(cn string) (certPEM, keyPEM string) {
 	kder, _ := x509.MarshalPKCS8PrivateKey(key)
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
 		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kder}))
+}
+
+// reconcileNodePools reports status.replicas equal to spec.replicas, as Strimzi does once the pods
+// exist (the lifecycle gate "the broker pool has the size that was asked for" reads it).
+func (s *opSim) reconcileNodePools(ctx context.Context) {
+	list, err := s.dyn.Resource(nodePoolGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	for i := range list.Items {
+		p := &list.Items[i]
+		if p.GetDeletionTimestamp() != nil {
+			continue
+		}
+		want, _, _ := unstructured.NestedInt64(p.Object, "spec", "replicas")
+		have, _, _ := unstructured.NestedInt64(p.Object, "status", "replicas")
+		og, _, _ := unstructured.NestedInt64(p.Object, "status", "observedGeneration")
+		if have == want && og == p.GetGeneration() {
+			continue
+		}
+		p.Object["status"] = map[string]any{"replicas": want, "observedGeneration": p.GetGeneration()}
+		_, _ = s.dyn.Resource(nodePoolGVR).Namespace(p.GetNamespace()).UpdateStatus(ctx, p, metav1.UpdateOptions{})
+	}
 }
 
 // reconcileUsers marks KafkaUser CRs Ready once the user secret they reference exists.

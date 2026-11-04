@@ -262,8 +262,12 @@ func (a *Activities) FailDelete(ctx context.Context, opID, clusterID string, e s
 
 // updateRequest is what the API stores in operations.request for an UpdateCluster operation.
 type updateRequest struct {
-	Action string `json:"action"` // user.create | user.rotate | user.delete
+	Action string `json:"action"` // user.create | user.rotate | user.delete | mtls.* | spec.change
 	User   string `json:"user,omitempty"`
+	// Kind and NeedsCapacity describe a spec.change (engine.Change): the workflow reserves capacity for
+	// the new spec before publishing it when NeedsCapacity is set.
+	Kind          string `json:"kind,omitempty"`
+	NeedsCapacity bool   `json:"needsCapacity,omitempty"`
 }
 
 func (a *Activities) loadUpdate(ctx context.Context, opID string) (updateRequest, error) {
@@ -303,16 +307,25 @@ func GeneratePassword() (string, error) {
 // PrepareUpdate creates (user.create) or replaces (user.rotate) the secret a user needs and records
 // its version in the cluster spec. It is safe to re-run: user.create keeps an existing secret.
 func (a *Activities) PrepareUpdate(ctx context.Context, opID, clusterID string) error {
+	return faultPoint(ActPrepareUpdate, a.prepareUpdate(ctx, opID, clusterID))
+}
+
+func (a *Activities) prepareUpdate(ctx context.Context, opID, clusterID string) error {
 	req, err := a.loadUpdate(ctx, opID)
 	if err != nil {
 		return classify(err)
 	}
-	if req.Action != "user.create" && req.Action != "user.rotate" {
-		return nil
-	}
 	c, err := a.Store.ClusterByID(ctx, clusterID)
 	if err != nil {
 		return classify(err)
+	}
+	if req.NeedsCapacity {
+		if err := a.reserveChange(ctx, opID, c); err != nil {
+			return err
+		}
+	}
+	if req.Action != "user.create" && req.Action != "user.rotate" {
+		return nil
 	}
 	if c.CellID == nil {
 		return Terminal(fmt.Errorf("cluster %s has no cell", clusterID))
@@ -342,6 +355,32 @@ func (a *Activities) PrepareUpdate(ctx context.Context, opID, clusterID string) 
 	return classify(a.Store.MutateSpecUnderLock(ctx, opID, clusterID, func(spec json.RawMessage) (json.RawMessage, error) {
 		return um.SetUserSecretVersion(spec, req.User, version)
 	}))
+}
+
+// reserveChange reserves capacity for the cluster's new spec in its own cell. When the cell cannot hold
+// it, the change is refused: the previous spec is restored (nothing was published yet) and the error is
+// terminal, so the operation fails with the reason and the cluster is untouched.
+func (a *Activities) reserveChange(ctx context.Context, opID string, c *store.Cluster) error {
+	if c.CellID == nil {
+		return Terminal(fmt.Errorf("cluster %s has no cell", c.ID))
+	}
+	e, err := a.Engines.Get(c.Engine)
+	if err != nil {
+		return classify(err)
+	}
+	req, err := e.PlanPlacement(c.ResourceSpec())
+	if err != nil {
+		return classify(err)
+	}
+	if err := a.Allocator.ReserveChange(ctx, opID, c.ID, *c.CellID, req); err != nil {
+		if errors.Is(err, capacity.ErrExhausted) {
+			if rerr := a.Store.RevertSpec(ctx, opID, c.ID); rerr != nil {
+				return rerr
+			}
+		}
+		return classify(err)
+	}
+	return nil
 }
 
 // FinishUpdate removes the secret of a deleted user and completes the operation.

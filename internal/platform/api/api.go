@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/clusters", s.authed(s.createCluster))
 	mux.HandleFunc("GET /v1/clusters", s.authed(s.listClusters))
 	mux.HandleFunc("GET /v1/clusters/{id}", s.authed(s.getCluster))
+	mux.HandleFunc("PATCH /v1/clusters/{id}", s.authed(s.updateCluster))
 	mux.HandleFunc("DELETE /v1/clusters/{id}", s.authed(s.deleteCluster))
 	mux.HandleFunc("GET /v1/clusters/{id}/bootstrap-brokers", s.authed(s.bootstrap))
 	mux.HandleFunc("GET /v1/clusters/{id}/ca-certificate", s.authed(s.caCertificate))

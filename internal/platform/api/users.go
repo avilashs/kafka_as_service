@@ -19,6 +19,9 @@ type updateRequest struct {
 	Action string          `json:"action"`
 	User   string          `json:"user,omitempty"`
 	Body   json.RawMessage `json:"body,omitempty"` // user.create: the request as sent (no secrets are ever in it)
+	// Kind and NeedsCapacity describe a spec.change (see workflows.updateRequest).
+	Kind          string `json:"kind,omitempty"`
+	NeedsCapacity bool   `json:"needsCapacity,omitempty"`
 }
 
 // userManager returns the engine's user support for a cluster the tenant owns.
@@ -277,6 +280,11 @@ func (s *Server) deleteUser(mech string) handler {
 func (s *Server) update(w http.ResponseWriter, r *http.Request, tenant, key, opType string, req updateRequest, mutate func(*store.Cluster) (json.RawMessage, error)) {
 	id := r.PathValue("id")
 	hash, _ := canonicalHash(map[string]any{"op": opType, "clusterId": id, "req": req})
+	s.updateHashed(w, r, tenant, key, hash, opType, req, mutate)
+}
+
+func (s *Server) updateHashed(w http.ResponseWriter, r *http.Request, tenant, key, hash, opType string, req updateRequest, mutate func(*store.Cluster) (json.RawMessage, error)) {
+	id := r.PathValue("id")
 	reqJSON, _ := json.Marshal(req)
 	op, replay, err := s.Store.UpdateClusterSpec(r.Context(), store.UpdateSpecInput{
 		MutationInput: store.MutationInput{TenantID: tenant, Actor: "tenant:" + tenant, IdempotencyKey: key, RequestHash: hash, Request: reqJSON},

@@ -62,6 +62,35 @@ paths:
               schema: { $ref: '#/components/schemas/Cluster' }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+    patch:
+      operationId: updateCluster
+      summary: Change a cluster (resize, scale, expand storage, change configuration, upgrade)
+      description: |
+        A JSON merge patch (RFC 7386) of `spec`. One kind of change per request:
+        `brokerType` (resize: rolling restart, one broker at a time), `brokerCount` (scale out or in, in
+        steps of 3; partitions are rebalanced by Cruise Control), `storage` (grow only), `config`
+        (allowlisted broker configuration; dynamic where Kafka allows), or `kafkaVersion` (forward only).
+        Users are changed through the user endpoints. The operation succeeds when the cluster is Ready
+        again for the new spec: rolls finished and, for scale, the rebalance complete.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [spec]
+              properties:
+                spec: { type: object, description: 'Partial KafkaSpec; a null value removes a config key' }
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
     delete:
       operationId: deleteCluster
       summary: Delete a cluster
@@ -379,7 +408,7 @@ components:
         kafkaVersion: { type: string, enum: ['4.3.0', '4.3.1'] }
         brokerType:
           type: string
-          enum: [s.small, s.medium, s.large, d.xlarge, d.2xlarge, d.4xlarge, d.8xlarge, d.nvme.2xlarge, d.nvme.4xlarge, dev.tiny, dev.ded]
+          enum: [s.small, s.medium, s.large, d.xlarge, d.2xlarge, d.4xlarge, d.8xlarge, d.nvme.2xlarge, d.nvme.4xlarge, dev.tiny, dev.small, dev.ded]
         brokerCount: { type: integer, minimum: 3, maximum: 48, multipleOf: 3 }
         storage:
           type: object
@@ -485,7 +514,7 @@ components:
       properties:
         id: { type: string }
         clusterId: { type: string }
-        type: { type: string, enum: [CreateCluster, DeleteCluster, CreateScramUser, RotateScramUser, DeleteScramUser, CreateMtlsUser, RenewMtlsCertificate, DeleteMtlsUser] }
+        type: { type: string, enum: [CreateCluster, DeleteCluster, CreateScramUser, RotateScramUser, DeleteScramUser, CreateMtlsUser, RenewMtlsCertificate, DeleteMtlsUser, ChangeConfig, ResizeCluster, ScaleCluster, ExpandStorage, UpgradeCluster] }
         state: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
         step: { type: string }
         error:

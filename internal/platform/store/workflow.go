@@ -328,11 +328,51 @@ func (s *Store) MutateSpecUnderLock(ctx context.Context, opID, clusterID string,
 	})
 }
 
+// RevertSpec restores the spec the cluster had before the operation's change (used when the change
+// could not be placed, before anything was published). The spec generation moves forward, never back.
+func (s *Store) RevertSpec(ctx context.Context, opID, clusterID string) error {
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		_, done, err := lockedCluster(ctx, tx, opID, clusterID)
+		if err != nil || done {
+			return err
+		}
+		var req struct {
+			Prior json.RawMessage `json:"prior"`
+		}
+		var raw []byte
+		if err := tx.QueryRow(ctx, `SELECT request FROM operations WHERE id=$1`, opID).Scan(&raw); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &req); err != nil || len(req.Prior) == 0 {
+			return fmt.Errorf("operation %s has no prior spec to restore", opID)
+		}
+		_, err = tx.Exec(ctx, `UPDATE clusters SET spec=$2, spec_generation=spec_generation+1, updated_at=now() WHERE id=$1`, clusterID, []byte(req.Prior))
+		return err
+	})
+}
+
+// settleReservations is run when an update that held a reservation ends. On success the new reservation is
+// committed and every older one of the cluster released. On failure the new one is committed too and the
+// old one kept: the cell may hold part of the change, so both stay accounted until the next successful
+// change or the delete reconciles them (over-counting is the safe direction).
+func settleReservations(ctx context.Context, tx pgx.Tx, opID, clusterID string, success bool) error {
+	tag, err := tx.Exec(ctx, `UPDATE reservations SET status='COMMITTED' WHERE operation_id=$1 AND status='HELD'`, opID)
+	if err != nil || tag.RowsAffected() == 0 || !success {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE reservations SET status='RELEASED', released_at=now()
+		WHERE cluster_id=$1 AND operation_id<>$2 AND status<>'RELEASED'`, clusterID, opID)
+	return err
+}
+
 // FinishUpdate returns the cluster to ACTIVE and completes the operation.
 func (s *Store) FinishUpdate(ctx context.Context, opID, clusterID, action string) error {
 	return s.InTx(ctx, func(tx pgx.Tx) error {
 		c, done, err := lockedCluster(ctx, tx, opID, clusterID)
 		if err != nil || done {
+			return err
+		}
+		if err := settleReservations(ctx, tx, opID, clusterID, true); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE clusters SET state='ACTIVE', state_reason=NULL, lock_operation_id=NULL, updated_at=now() WHERE id=$1`, clusterID); err != nil {
@@ -351,6 +391,9 @@ func (s *Store) FailUpdate(ctx context.Context, opID, clusterID, action string, 
 	return s.InTx(ctx, func(tx pgx.Tx) error {
 		c, done, err := lockedCluster(ctx, tx, opID, clusterID)
 		if err != nil || done {
+			return err
+		}
+		if err := settleReservations(ctx, tx, opID, clusterID, false); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE clusters SET state='ACTIVE', state_reason=$2, lock_operation_id=NULL, updated_at=now() WHERE id=$1`,

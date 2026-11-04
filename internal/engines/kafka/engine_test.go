@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -476,5 +477,97 @@ func TestAuthorizationAndPluginImage(t *testing.T) {
 		GroupZones: map[string][]string{"controllers": env.Zones, "brokers": env.Zones}, OperatorShard: 2}, noImg)
 	if err == nil || !strings.Contains(err.Error(), "no platform Kafka image") {
 		t.Errorf("render without an image: %v", err)
+	}
+}
+
+func TestObserveStatusLifecycleGates(t *testing.T) {
+	e := New()
+	rs := spec(t, engine.TierShared, okSpec()) // 3 brokers
+	mk := func(autoRebalance string, replicas int) engine.Observed {
+		kst := `{"observedGeneration":3,"conditions":[{"type":"Ready","status":"True"}]` + autoRebalance + `}`
+		pst := fmt.Sprintf(`{"replicas":%d}`, replicas)
+		return engine.Observed{Generation: 1, Objects: []engine.ObjectStatus{
+			{Kind: "Kafka", Name: "kc-0123456789", Exists: true, Generation: 3, Status: json.RawMessage(kst)},
+			{Kind: "KafkaNodePool", Name: "controllers", Exists: true, Status: json.RawMessage(`{"replicas":3}`)},
+			{Kind: "KafkaNodePool", Name: "brokers", Exists: true, Status: json.RawMessage(pst)},
+		}}
+	}
+	cases := []struct {
+		name  string
+		obs   engine.Observed
+		ready bool
+	}{
+		{"steady", mk(``, 3), true},
+		{"auto-rebalance idle", mk(`,"autoRebalance":{"state":"Idle"}`, 3), true},
+		{"rebalancing after scale up", mk(`,"autoRebalance":{"state":"RebalanceOnScaleUp"}`, 3), false},
+		{"rebalancing before scale down", mk(`,"autoRebalance":{"state":"RebalanceOnScaleDown"}`, 3), false},
+		{"brokers not all there yet", mk(``, 2), false},
+		{"brokers not removed yet", mk(``, 6), false},
+	}
+	for _, tc := range cases {
+		st, err := e.ObserveStatus(rs, tc.obs)
+		if err != nil || st.Ready != tc.ready {
+			t.Errorf("%s: ready=%v (%s), want %v", tc.name, st.Ready, st.Reason, tc.ready)
+		}
+	}
+}
+
+func TestClassifyChange(t *testing.T) {
+	e := New()
+	base := okSpec()
+	mk := func(f func(*Spec)) engine.ResourceSpec {
+		s := base
+		s.Config = map[string]string{}
+		f(&s)
+		return spec(t, engine.TierShared, s)
+	}
+	from := mk(func(*Spec) {})
+	ok := []struct {
+		name string
+		f    func(*Spec)
+		kind string
+		cap  bool
+	}{
+		{"config", func(s *Spec) { s.Config = map[string]string{"log.retention.hours": "48"} }, "config", false},
+		{"storage", func(s *Spec) { s.Storage.SizeGiB += 10 }, "storage", false},
+		{"autoexpand bounds", func(s *Spec) { s.Storage.AutoExpand = !s.Storage.AutoExpand }, "storage", false},
+		{"size", func(s *Spec) { s.BrokerType = "s.medium" }, "size", true},
+		{"scale out", func(s *Spec) { s.BrokerCount = 6 }, "scale", true},
+		{"version", func(s *Spec) { s.KafkaVersion = "4.3.1" }, "version", false},
+	}
+	for _, tc := range ok {
+		f2 := from
+		if tc.kind == "version" {
+			f2 = mk(func(s *Spec) { s.KafkaVersion = "4.3.0" })
+		}
+		to := mk(func(s *Spec) {
+			if tc.kind == "version" {
+				s.KafkaVersion = "4.3.0"
+			}
+			tc.f(s)
+		})
+		c, err := e.ClassifyChange(f2, to)
+		if err != nil || c.Kind != tc.kind || c.NeedsCapacity != tc.cap {
+			t.Errorf("%s: %+v %v", tc.name, c, err)
+		}
+	}
+	bad := []struct {
+		name string
+		f    func(*Spec)
+	}{
+		{"nothing", func(*Spec) {}},
+		{"two kinds", func(s *Spec) { s.BrokerCount = 6; s.BrokerType = "s.medium" }},
+		{"shrink", func(s *Spec) { s.Storage.SizeGiB-- }},
+		{"downgrade", func(s *Spec) { s.KafkaVersion = "4.3.0" }},
+	}
+	for _, tc := range bad {
+		if c, err := e.ClassifyChange(from, mk(tc.f)); err == nil {
+			t.Errorf("%s accepted as %+v", tc.name, c)
+		}
+	}
+	// users are not changed through a spec change
+	to := mk(func(s *Spec) { s.Users = []User{{Name: "alice"}} })
+	if _, err := e.ClassifyChange(from, to); err == nil {
+		t.Error("a user change was accepted as a spec change")
 	}
 }

@@ -279,6 +279,22 @@ type Engine interface {
 	ObserveStatus(spec ResourceSpec, obs Observed) (Status, error)
 }
 
+// Change describes one lifecycle change of a live resource.
+type Change struct {
+	// Kind names the operation: "config", "size", "scale", "storage" or "version" for Kafka.
+	Kind string `json:"kind"`
+	// NeedsCapacity is true when the change alters what the resource asks of the cell's pools, so a new
+	// reservation must succeed before anything is published.
+	NeedsCapacity bool `json:"needsCapacity"`
+}
+
+// Changer is implemented by engines that support lifecycle changes. ClassifyChange is pure: it checks
+// that to is a valid successor of from (Validate has already accepted to on its own) and that it is exactly
+// one kind of change, which keeps every operation's safety argument local to that kind.
+type Changer interface {
+	ClassifyChange(from, to ResourceSpec) (Change, error)
+}
+
 // UserManager is implemented by engines whose resources have client users (Kafka: SCRAM users).
 // All methods are pure transformations of the engine's opaque spec, so the platform can run them
 // inside the transaction that takes the per-resource lock.

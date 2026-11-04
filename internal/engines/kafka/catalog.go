@@ -1,6 +1,10 @@
 package kafka
 
-import "github.com/avilashs/kafka_as_service/internal/platform/engine"
+import (
+	"strings"
+
+	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+)
 
 // BrokerType is a sellable broker size. See docs/design.md §11.
 type BrokerType struct {
@@ -44,8 +48,9 @@ var brokerTypes = map[string]BrokerType{
 	"d.nvme.2xlarge": {Name: "d.nvme.2xlarge", Tier: engine.TierDedicated, InstanceType: "i4i.2xlarge", CPURequestMilli: 7000, CPULimitMilli: 7000, MemoryMiB: 58 * 1024, HeapMiB: 6 * 1024, MinStorageGiB: 1700, MaxStorageGiB: 1700, MaxPartitions: 3000, LocalNVMe: true},
 	"d.nvme.4xlarge": {Name: "d.nvme.4xlarge", Tier: engine.TierDedicated, InstanceType: "i4i.4xlarge", CPURequestMilli: 15000, CPULimitMilli: 15000, MemoryMiB: 120 * 1024, HeapMiB: 8 * 1024, MinStorageGiB: 3400, MaxStorageGiB: 3400, MaxPartitions: 4000, LocalNVMe: true},
 	// Development sizes used by the kind environment only (tiny heap).
-	"dev.ded":  {Name: "dev.ded", Tier: engine.TierDedicated, InstanceType: "kind", CPURequestMilli: 500, CPULimitMilli: 500, MemoryMiB: 768, HeapMiB: 256, MinStorageGiB: 1, MaxStorageGiB: 10, MaxPartitions: 100},
-	"dev.tiny": {Name: "dev.tiny", Tier: engine.TierShared, CPURequestMilli: 100, CPULimitMilli: 1000, MemoryMiB: 768, HeapMiB: 256, MinStorageGiB: 1, MaxStorageGiB: 10, VolumeMBps: 0, MaxPartitions: 100},
+	"dev.ded":   {Name: "dev.ded", Tier: engine.TierDedicated, InstanceType: "kind", CPURequestMilli: 500, CPULimitMilli: 500, MemoryMiB: 768, HeapMiB: 256, MinStorageGiB: 1, MaxStorageGiB: 10, MaxPartitions: 100},
+	"dev.small": {Name: "dev.small", Tier: engine.TierShared, CPURequestMilli: 100, CPULimitMilli: 1000, MemoryMiB: 1024, HeapMiB: 384, MinStorageGiB: 1, MaxStorageGiB: 10, VolumeMBps: 0, MaxPartitions: 200},
+	"dev.tiny":  {Name: "dev.tiny", Tier: engine.TierShared, CPURequestMilli: 100, CPULimitMilli: 1000, MemoryMiB: 768, HeapMiB: 256, MinStorageGiB: 1, MaxStorageGiB: 10, VolumeMBps: 0, MaxPartitions: 100},
 }
 
 var controllerTypes = map[engine.Tier]ControllerType{
@@ -67,13 +72,13 @@ func LookupBrokerType(name string) (BrokerType, bool) {
 }
 
 func controllerFor(bt BrokerType) ControllerType {
-	if bt.Name == "dev.tiny" || bt.Name == "dev.ded" {
+	if isDev(bt) {
 		return devController
 	}
 	return controllerTypes[bt.Tier]
 }
 
-func isDev(bt BrokerType) bool { return bt.Name == "dev.tiny" || bt.Name == "dev.ded" }
+func isDev(bt BrokerType) bool { return strings.HasPrefix(bt.Name, "dev.") }
 
 func cruiseControlResources(bt BrokerType) engine.Resources {
 	if isDev(bt) {
