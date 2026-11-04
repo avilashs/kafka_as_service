@@ -77,11 +77,16 @@ Status values:
 
 | Library | Licence | Use |
 |---|---|---|
-| `org.apache.kafka:kafka-clients`, `kafka-server-common`, `kafka-metadata` (compile-only, provided) | Apache-2.0 | `CreateTopicPolicy`, `AlterConfigPolicy`, `Authorizer` interfaces |
-| Gradle | Apache-2.0 | Build |
-| JUnit 5 | EPL-2.0 | Tests only, not distributed |
+| `org.apache.kafka:kafka-clients`, `kafka-server-common`, `kafka-server`, `kafka-metadata` 4.3.1 (compile-only, `provided`) | Apache-2.0 | `StandardAuthorizer` (subclassed), `CreateTopicPolicy`, `AlterConfigPolicy` |
+| Apache Maven (plugins: compiler 3.13.0, surefire 3.5.2, jar 3.4.2) | Apache-2.0 | Build. M3 uses Maven, not Gradle as first planned: one `pom.xml`, no wrapper to vendor. |
+| JUnit 5.11.4, slf4j-simple 1.7.36 | EPL-2.0 / MIT | Tests only, not distributed |
+
+Runtime dependency of the jar: none beyond the Kafka jars already in the broker image.
 
 ## Tooling and tests
+
+M3 additions: `alpine/socat` (GPL-2.0 tool, run only as a throw-away container in CI to relay port 443; not distributed), `openbao/openbao:2.4.0` (MPL-2.0, dev server in tests), the Strimzi Kafka image `quay.io/strimzi/kafka:1.3.0-kafka-4.3.1` as client tools in CI (Apache-2.0, UBI base).
+
 
 | Tool | Licence | Use |
 |---|---|---|
