@@ -32,8 +32,10 @@ jobs:
         with: { go-version-file: go.mod }
       - name: Install kind
         run: |
-          curl -sSfLo /usr/local/bin/kind https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64
-          chmod +x /usr/local/bin/kind
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfLo "$HOME/.local/bin/kind" https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64
+          chmod +x "$HOME/.local/bin/kind"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: make kind-up
       - run: make kind-smoke
       - name: Diagnostics
