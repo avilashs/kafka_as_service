@@ -208,7 +208,7 @@ scenario_connect() {
 
   expect_ok "writer: console producer writes 50 messages" produce_50 "$wr" orders-1 "$boot_a"
   local got
-  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic orders-1 --group grp-1 --from-beginning --max-messages 50 --timeout-ms 60000 2>/dev/null | sort -u | wc -l || true)
+  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic orders-1 --group grp-1 --from-beginning --max-messages 50 --timeout-ms 60000 2>/dev/null | grep '^message-' | sort -u | wc -l || true)
   [[ "$got" == 50 ]] && record PASS "reader: console consumer reads back all 50 distinct messages" || record FAIL "reader: console consumer read $got distinct messages, want 50"
 
   echo "== authorisation (ACLs)"
@@ -226,7 +226,7 @@ scenario_connect() {
     kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --add --allow-principal User:reader --operation Read --operation Describe --topic private-1
   expect_ok "admin: list ACLs (DescribeAcls)" kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --list --topic private-1
   echo "y" | produce "$adm" private-1 "$boot_a" >/dev/null 2>&1 || true
-  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic private-1 --group grp-3 --from-beginning --max-messages 1 --timeout-ms 60000 2>/dev/null | wc -l || true)
+  got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$rd" --topic private-1 --group grp-3 --from-beginning --max-messages 1 --timeout-ms 60000 2>/dev/null | grep -c '^y$' || true)
   [[ "$got" == 1 ]] && record PASS "reader reads private-1 once the tenant admin granted it" || record FAIL "reader could not read private-1 after the grant (got $got)"
   check_denied "admin cannot grant cluster-level Alter" "authoriz|platform|denied" \
     kafka kafka-acls --bootstrap-server "$boot_a" --command-config "$adm" --add --allow-principal User:reader --cluster --operation Alter
@@ -241,9 +241,10 @@ scenario_connect() {
   kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --topic orders-tx --partitions 3 --replication-factor 3 >/dev/null 2>&1 || true
   expect_ok "admin: transactional producer commits 200 records (kafka-producer-perf-test, transactional.id)" \
     kafka kafka-producer-perf-test --topic orders-tx --num-records 200 --record-size 64 --throughput -1 \
-      --producer.config "$adm" --transaction-duration-ms 200 --producer-props transactional.id=tx-e2e enable.idempotence=true acks=all
+      --command-config "$adm" --transaction-duration-ms 200 \
+      --command-property bootstrap.servers="$boot_a" transactional.id=tx-e2e enable.idempotence=true acks=all
   got=$(kafka kafka-console-consumer --bootstrap-server "$boot_a" --consumer.config "$adm" --topic orders-tx --group grp-tx --from-beginning \
-        --consumer-property isolation.level=read_committed --max-messages 200 --timeout-ms 60000 2>/dev/null | wc -l || true)
+        --consumer-property isolation.level=read_committed --max-messages 200 --timeout-ms 60000 2>/dev/null | awk 'length($0)==64' | wc -l || true)
   [[ "$got" == 200 ]] && record PASS "read_committed consumer sees exactly the 200 committed records" || record FAIL "read_committed consumer saw $got records, want 200"
   expect_ok "consumer groups listed through the Admin API" \
     kafka kafka-consumer-groups --bootstrap-server "$boot_a" --command-config "$adm" --list
@@ -268,8 +269,10 @@ scenario_connect() {
     kafka kafka-topics --bootstrap-server "$boot_b" --command-config /work/x-a-creds-b-ca.properties --list
   check_denied "A's CA does not validate B's brokers" "ssl|certificate|handshake|PKIX" \
     kafka kafka-topics --bootstrap-server "$boot_b" --command-config "/work/$cida-admin1.properties" --list
-  check_denied "B's credentials with A's CA do not get into A" "ssl|certificate|handshake|PKIX" \
+  check_denied "B's admin password does not work on A even though A's CA is trusted (same user name, other cluster)" "authentication|SASL" \
     kafka kafka-topics --bootstrap-server "$boot_a" --command-config /work/x-b-creds-a-ca.properties --list
+  check_denied "B's CA does not validate A's brokers" "ssl|certificate|handshake|PKIX" \
+    kafka kafka-topics --bootstrap-server "$boot_a" --command-config "/work/$cidb-admin1.properties" --list
   expect_ok "B's own admin works on B (control)" kafka kafka-topics --bootstrap-server "$boot_b" --command-config "$badm" --list
   expect_ok "tenant B's API token cannot read A's credentials (404)" bash -c "! curl -sf -H 'Authorization: Bearer $API_B_TOKEN' $API/v1/clusters/$cida/scram-users/admin1/credentials"
 
