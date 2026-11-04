@@ -368,7 +368,17 @@ func (a *Agent) ensurePools(ctx context.Context, pools []engine.NodePoolSpec) er
 // driveDelete performs one pass of deleting a resource and reports whether it is finished:
 // objects deleted, pods terminated quickly (the data is being destroyed anyway), and only
 // then the dedicated nodes returned. Called on every status tick until it reports done.
+//
+// Order matters. The grace period a kubelet works to is the one on the *first* delete it sees:
+// shortening it afterwards updates the API object but does not interrupt a container stop that
+// is already running (CI showed brokers lingering for the full 300 s with gracePeriod=20 stamped
+// on them). Deleting an owner makes garbage collection delete its pods with their full grace, so
+// the pods must be deleted with the short grace *before* the owners go, and once more after, for
+// pods an operator recreated in between.
 func (a *Agent) driveDelete(ctx context.Context, refs []ObjectRef, pools []engine.NodePoolSpec, graceSeconds int64) (bool, error) {
+	if graceSeconds > 0 {
+		a.terminatePods(ctx, refs, graceSeconds)
+	}
 	gone, err := a.deleteRefs(ctx, refs)
 	if graceSeconds > 0 {
 		a.terminatePods(ctx, refs, graceSeconds)

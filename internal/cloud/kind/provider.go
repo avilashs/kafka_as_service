@@ -203,8 +203,8 @@ func (p *Provider) Release(ctx context.Context, spec engine.NodePoolSpec) (bool,
 			delete(cur.Labels, labels.DedicatedOwner)
 			cur.Labels[labels.NodePool] = labels.PoolSpare
 			cur.Spec.Taints = withoutTaint(cur.Spec.Taints, labels.TaintDedicated)
-			// Back to a spare: closed to general workloads again (the taint is added last-in-update,
-			// together with removing the owner taint, so there is never an untainted moment).
+			// Back to a spare: closed to general workloads again. The owner taint is removed and the
+			// spare taint added in this same update, so the node is never open to everyone.
 			cur.Spec.Taints = append(withoutTaint(cur.Spec.Taints, labels.TaintSpare),
 				corev1.Taint{Key: labels.TaintSpare, Value: "true", Effect: corev1.TaintEffectNoSchedule})
 			_, err = p.Kube.CoreV1().Nodes().Update(ctx, cur, metav1.UpdateOptions{})
