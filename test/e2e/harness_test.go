@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ import (
 	"github.com/avilashs/kafka_as_service/internal/platform/cellapi"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
 	"github.com/avilashs/kafka_as_service/internal/platform/outbox"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -63,6 +65,7 @@ var (
 	workerBin  string
 	auditBin   string
 	st         *store.Store
+	secretsSt  secrets.Store // the secret manager every component of the test uses
 	sim        *opSim
 	logger     = slog.New(slog.NewTextHandler(io.Discard, nil))
 )
@@ -123,9 +126,25 @@ func run(m *testing.M) int {
 	kube = kubernetes.NewForConfigOrDie(restCfg)
 	dyn = dynamic.NewForConfigOrDie(restCfg)
 
-	// Worker binary with fault injection compiled in.
 	tmp, _ := os.MkdirTemp("", "streamcell-e2e")
 	defer os.RemoveAll(tmp)
+
+	// Secret manager: real OpenBao when configured (CI), a 0600-file tree otherwise. The worker
+	// subprocess inherits these variables.
+	if addr := os.Getenv("STREAMCELL_E2E_OPENBAO_ADDR"); addr != "" {
+		os.Setenv("SECRETS_BACKEND", "openbao")
+		os.Setenv("OPENBAO_ADDR", addr)
+		os.Setenv("OPENBAO_TOKEN", os.Getenv("STREAMCELL_E2E_OPENBAO_TOKEN"))
+	} else {
+		os.Setenv("SECRETS_BACKEND", "file")
+		os.Setenv("SECRETS_DIR", filepath.Join(tmp, "secrets"))
+	}
+	if secretsSt, err = secrets.FromEnv(); err != nil {
+		fmt.Println("e2e: secrets:", err)
+		return 1
+	}
+
+	// Worker binary with fault injection compiled in.
 	workerBin = filepath.Join(tmp, "streamcell-worker")
 	build := exec.Command("go", "build", "-tags", "faultinject", "-o", workerBin, "./cmd/streamcell-worker")
 	build.Dir = repoRoot
@@ -173,6 +192,33 @@ type env struct {
 	stopAgnt context.CancelFunc
 	temporal client.Client
 	workers  []*worker
+	tokens   *tokenMap
+}
+
+// tokenMap is an api.Authenticator whose tokens tests can add while the server runs.
+type tokenMap struct {
+	mu sync.RWMutex
+	m  map[string]string
+}
+
+func (tm *tokenMap) set(tok, tenant string) { tm.mu.Lock(); tm.m[tok] = tenant; tm.mu.Unlock() }
+
+// Tenant implements api.Authenticator.
+func (tm *tokenMap) Tenant(r *http.Request) (string, error) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return api.StaticTokens(tm.m).Tenant(r)
+}
+
+// otherTenant registers a second tenant in the same cell and returns its token.
+func (e *env) otherTenant() string {
+	e.t.Helper()
+	id, tok := "tenant-"+randHex(3), "tok-"+randHex(8)
+	if err := st.UpsertTenant(context.Background(), id, id, &e.cellID); err != nil {
+		e.t.Fatal(err)
+	}
+	e.tokens.set(tok, id)
+	return tok
 }
 
 // killWorkers stops every worker this env started.
@@ -185,7 +231,8 @@ func (e *env) killWorkers() {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	ctx := context.Background()
-	e := &env{t: t, cellID: "cell-" + randHex(3), tenant: "tenant-" + randHex(3), token: "tok-" + randHex(8)}
+	e := &env{t: t, cellID: "cell-" + randHex(3), tenant: "tenant-" + randHex(3), token: "tok-" + randHex(8), tokens: &tokenMap{m: map[string]string{}}}
+	e.tokens.set(e.token, e.tenant)
 	cellTok := "celltok-" + randHex(8)
 	zones := []string{"zone-a", "zone-b", "zone-c"}
 	zc := func(cpu, mem int64, nodes int) []store.ZoneCapacity {
@@ -219,7 +266,7 @@ func newEnv(t *testing.T) *env {
 	}
 	e.temporal = tc
 	reg := engine.NewRegistry(kafka.New())
-	apiSrv := httptest.NewServer((&api.Server{Store: st, Engines: reg, Auth: api.StaticTokens{e.token: e.tenant}, Log: logger}).Handler())
+	apiSrv := httptest.NewServer((&api.Server{Store: st, Engines: reg, Secrets: secretsSt, Auth: e.tokens, Log: logger}).Handler())
 	cellSrv := httptest.NewServer((&cellapi.Server{Store: st, Log: logger, MaxWait: 2 * time.Second, PollEvery: 100 * time.Millisecond}).Handler())
 	e.apiURL, e.cellURL = apiSrv.URL, cellSrv.URL
 	dctx, stopDispatch := context.WithCancel(ctx)
@@ -247,6 +294,7 @@ func (e *env) startAgent(cellTok, stateNS string) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
+	ag.Secrets = secretsSt
 	ag.Pools = &kindprov.Provider{Kube: kube, SpareSelector: "test-cell=" + e.cellID}
 	ctx, cancel := context.WithCancel(context.Background())
 	e.agent, e.stopAgnt = ag, cancel
@@ -316,9 +364,16 @@ type apiResp struct {
 	Code   int
 	Header http.Header
 	Body   map[string]any
+	Raw    string
 }
 
 func (e *env) call(method, path, idemKey string, body any) apiResp {
+	e.t.Helper()
+	return e.callAs(e.token, method, path, idemKey, body)
+}
+
+// callAs is call with another tenant's token.
+func (e *env) callAs(token, method, path, idemKey string, body any) apiResp {
 	e.t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -326,7 +381,7 @@ func (e *env) call(method, path, idemKey string, body any) apiResp {
 		rd = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, e.apiURL+path, rd)
-	req.Header.Set("Authorization", "Bearer "+e.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	if idemKey != "" {
 		req.Header.Set("Idempotency-Key", idemKey)
 	}
@@ -336,7 +391,9 @@ func (e *env) call(method, path, idemKey string, body any) apiResp {
 	}
 	defer resp.Body.Close()
 	out := apiResp{Code: resp.StatusCode, Header: resp.Header}
-	_ = json.NewDecoder(resp.Body).Decode(&out.Body)
+	raw, _ := io.ReadAll(resp.Body)
+	out.Raw = string(raw)
+	_ = json.Unmarshal(raw, &out.Body)
 	return out
 }
 

@@ -392,3 +392,52 @@ func (s *Store) DispatchOutbox(ctx context.Context, limit int, fn func(OutboxEnt
 	})
 	return done, err
 }
+
+// UpdateSpecInput describes a tenant change to a live cluster's spec (add or remove a user, ...).
+type UpdateSpecInput struct {
+	MutationInput
+	ClusterID string
+	OpID      string
+	OpType    string // operation type, for example "CreateScramUser"
+	// Mutate receives the cluster and returns its new spec. It runs inside the transaction that
+	// holds the cluster's row lock, so it sees exactly the spec the new generation is derived from.
+	// An error from Mutate is returned as is (the API maps validation errors to 422).
+	Mutate func(c *Cluster) (json.RawMessage, error)
+}
+
+// UpdateClusterSpec atomically takes the per-resource lock, replaces the spec, bumps the spec
+// generation, marks the cluster UPDATING and enqueues the UpdateCluster workflow. The spec is the
+// desired state: if the workflow later fails, the spec stays and the operation reports the failure.
+func (s *Store) UpdateClusterSpec(ctx context.Context, in UpdateSpecInput) (op *Operation, replay bool, err error) {
+	err = s.InTx(ctx, func(tx pgx.Tx) error {
+		existing, err := lookupIdempotency(ctx, tx, in.MutationInput)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			op, replay = existing, true
+			return nil
+		}
+		c, err := scanCluster(tx.QueryRow(ctx, `SELECT `+clusterCols+` FROM clusters WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, in.ClusterID, in.TenantID))
+		if err != nil {
+			return err
+		}
+		if c.LockOperationID != nil {
+			return &ConflictError{Msg: fmt.Sprintf("cluster has an operation in progress (%s)", *c.LockOperationID)}
+		}
+		if c.State != "ACTIVE" && c.State != "DEGRADED" {
+			return &ConflictError{Msg: fmt.Sprintf("cluster cannot be changed in state %s", c.State)}
+		}
+		newSpec, err := in.Mutate(c)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE clusters SET spec=$2, spec_generation=spec_generation+1, state='UPDATING',
+			lock_operation_id=$3, updated_at=now() WHERE id=$1`, in.ClusterID, []byte(newSpec), in.OpID); err != nil {
+			return err
+		}
+		op, err = insertOpAndOutbox(ctx, tx, in.MutationInput, in.OpID, in.ClusterID, in.OpType, "UpdateCluster")
+		return err
+	})
+	return op, replay, err
+}

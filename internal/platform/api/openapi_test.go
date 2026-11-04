@@ -84,6 +84,32 @@ func TestWireTypesMatchSchemas(t *testing.T) {
 	}
 }
 
+// The user list and credentials responses satisfy their schemas.
+func TestUserWireTypesMatchSchemas(t *testing.T) {
+	doc := loadSpec(t)
+	e := kafka.New()
+	spec := json.RawMessage(`{"kafkaVersion":"4.3.1","brokerType":"s.small","brokerCount":3,"storage":{"sizeGiB":10}}`)
+	spec, _, err := e.AddUser(spec, json.RawMessage(`{"name":"app","acls":[{"resource":{"type":"topic","name":"t","patternType":"prefix"},"operations":["Read"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := e.ListUsers(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users []any
+	_ = json.Unmarshal(list, &users)
+	for _, u := range users {
+		if err := doc.Components.Schemas["ScramUser"].Value.VisitJSON(u); err != nil {
+			t.Errorf("ScramUser: %v", err)
+		}
+	}
+	cred := map[string]any{"username": "app", "password": "x", "mechanism": "SCRAM-SHA-512", "secretVersion": 1}
+	if err := doc.Components.Schemas["ScramCredentials"].Value.VisitJSON(cred); err != nil {
+		t.Errorf("ScramCredentials: %v", err)
+	}
+}
+
 // Validation and auth errors are returned before touching the database.
 func TestRequestValidation(t *testing.T) {
 	s := &Server{Engines: engine.NewRegistry(kafka.New()), Auth: StaticTokens{"tok": "t1"}}

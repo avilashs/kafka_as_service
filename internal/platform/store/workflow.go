@@ -293,3 +293,73 @@ func (s *Store) FailDelete(ctx context.Context, opID, clusterID string, opErr Op
 		return audit(ctx, tx, "system", c.TenantID, "DeleteCluster", "cluster/"+clusterID, "failed")
 	})
 }
+
+// OperationRequest returns the stored request of an operation (what the tenant asked for).
+func (s *Store) OperationRequest(ctx context.Context, opID string) (json.RawMessage, error) {
+	var raw []byte
+	err := s.Pool.QueryRow(ctx, `SELECT request FROM operations WHERE id=$1`, opID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return raw, err
+}
+
+// SetUserSecretVersion records, in the cluster spec, which secret version a user's rendered state
+// refers to. It is done by the workflow after the secret exists and before the new generation is
+// rendered, so that a rotation changes the rendered state. mutate gets the current spec.
+func (s *Store) MutateSpecUnderLock(ctx context.Context, opID, clusterID string, mutate func(spec json.RawMessage) (json.RawMessage, error)) error {
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		c, done, err := lockedCluster(ctx, tx, opID, clusterID)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		newSpec, err := mutate(c.Spec)
+		if err != nil {
+			return err
+		}
+		if string(newSpec) == string(c.Spec) {
+			return nil
+		}
+		_, err = tx.Exec(ctx, `UPDATE clusters SET spec=$2, updated_at=now() WHERE id=$1`, clusterID, []byte(newSpec))
+		return err
+	})
+}
+
+// FinishUpdate returns the cluster to ACTIVE and completes the operation.
+func (s *Store) FinishUpdate(ctx context.Context, opID, clusterID, action string) error {
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		c, done, err := lockedCluster(ctx, tx, opID, clusterID)
+		if err != nil || done {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE clusters SET state='ACTIVE', state_reason=NULL, lock_operation_id=NULL, updated_at=now() WHERE id=$1`, clusterID); err != nil {
+			return err
+		}
+		if err := finishOp(ctx, tx, opID, "SUCCEEDED", nil); err != nil {
+			return err
+		}
+		return audit(ctx, tx, "system", c.TenantID, action, "cluster/"+clusterID, "succeeded")
+	})
+}
+
+// FailUpdate completes the operation as FAILED. The cluster keeps serving, so it goes back to
+// ACTIVE (not FAILED); the new spec stays as the desired state and the reason is recorded.
+func (s *Store) FailUpdate(ctx context.Context, opID, clusterID, action string, opErr OpError) error {
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		c, done, err := lockedCluster(ctx, tx, opID, clusterID)
+		if err != nil || done {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE clusters SET state='ACTIVE', state_reason=$2, lock_operation_id=NULL, updated_at=now() WHERE id=$1`,
+			clusterID, action+" failed: "+opErr.Message); err != nil {
+			return err
+		}
+		if err := finishOp(ctx, tx, opID, "FAILED", &opErr); err != nil {
+			return err
+		}
+		return audit(ctx, tx, "system", c.TenantID, action, "cluster/"+clusterID, "failed")
+	})
+}

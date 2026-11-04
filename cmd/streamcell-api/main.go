@@ -21,6 +21,7 @@ import (
 	"github.com/avilashs/kafka_as_service/internal/platform/cellapi"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
 	"github.com/avilashs/kafka_as_service/internal/platform/outbox"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -55,8 +56,13 @@ func main() {
 			tokens[tok] = tenant
 		}
 	}
+	sec, err := secrets.FromEnv()
+	if err != nil {
+		log.Error("secrets", "err", err)
+		os.Exit(1)
+	}
 	reg := engine.NewRegistry(kafka.New())
-	tenantSrv := &http.Server{Addr: env("LISTEN", ":8080"), Handler: (&api.Server{Store: st, Engines: reg, Auth: tokens, Log: log}).Handler(), ReadHeaderTimeout: 10 * time.Second}
+	tenantSrv := &http.Server{Addr: env("LISTEN", ":8080"), Handler: (&api.Server{Store: st, Engines: reg, Secrets: sec, Auth: tokens, Log: log}).Handler(), ReadHeaderTimeout: 10 * time.Second}
 	cellSrv := &http.Server{Addr: env("CELL_LISTEN", ":8081"), Handler: (&cellapi.Server{Store: st, Log: log}).Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	go (&outbox.Dispatcher{Store: st, Temporal: tc, Log: log}).Run(ctx)

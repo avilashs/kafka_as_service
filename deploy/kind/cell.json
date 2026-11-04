@@ -17,6 +17,7 @@
     "storageClass": "standard",
     "gatewayName": "streamcell-gateway",
     "gatewayNamespace": "streamcell-gateway",
+    "gatewayDataPlaneNamespace": "envoy-gateway-system",
     "apiServerCIDRs": [
       "10.96.0.1/32",
       "__APISERVER_IP__/32"

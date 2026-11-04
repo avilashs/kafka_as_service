@@ -124,6 +124,7 @@ func compensateCreate(ctx workflow.Context, in Input, cause error) error {
 		var st engine.Status
 		if err := workflow.ExecuteActivity(waitOpts(ctx, DeletedTimeout), a.WaitForCondition, in.OperationID, in.ClusterID, gen, engine.Condition{Type: "Deleted"}).Get(ctx, &st); err == nil {
 			cleaned = true
+			_ = workflow.ExecuteActivity(sctx, a.DeleteClusterSecrets, in.ClusterID).Get(ctx, nil)
 		}
 	}
 	return failCreate(ctx, in, cause, cleaned)
@@ -151,13 +152,49 @@ func DeleteCluster(ctx workflow.Context, in Input) error {
 	if err := workflow.ExecuteActivity(waitOpts(ctx, DeletedTimeout), a.WaitForCondition, in.OperationID, in.ClusterID, gen, engine.Condition{Type: "Deleted"}).Get(ctx, &st); err != nil {
 		return workflow.ExecuteActivity(sctx, a.FailDelete, in.OperationID, in.ClusterID, opError(err)).Get(ctx, nil)
 	}
+	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "delete-secrets").Get(ctx, nil)
+	if err := workflow.ExecuteActivity(sctx, a.DeleteClusterSecrets, in.ClusterID).Get(ctx, nil); err != nil {
+		return workflow.ExecuteActivity(sctx, a.FailDelete, in.OperationID, in.ClusterID, opError(err)).Get(ctx, nil)
+	}
 	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "finish").Get(ctx, nil)
 	return workflow.ExecuteActivity(sctx, a.FinishDelete, in.OperationID, in.ClusterID).Get(ctx, nil)
+}
+
+// UpdateCluster applies a change to a live cluster's spec: prepare secrets, publish the new
+// generation, wait until the engine reports it Ready, then finish. The spec was changed (and the
+// cluster locked and marked UPDATING) by the API in one transaction, so a failure here leaves the
+// desired state in place and is reported on the operation.
+func UpdateCluster(ctx workflow.Context, in Input) error {
+	var a *Activities
+	sctx := shortOpts(ctx)
+	fail := func(cause error) error {
+		return workflow.ExecuteActivity(sctx, a.FailUpdate, in.OperationID, in.ClusterID, opError(cause)).Get(ctx, nil)
+	}
+	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "prepare").Get(ctx, nil)
+	if err := workflow.ExecuteActivity(sctx, a.PrepareUpdate, in.OperationID, in.ClusterID).Get(ctx, nil); err != nil {
+		return fail(err)
+	}
+	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "publish-desired-state").Get(ctx, nil)
+	var gen int64
+	if err := workflow.ExecuteActivity(sctx, a.RenderAndPublish, in.OperationID, in.ClusterID, int64(0)).Get(ctx, &gen); err != nil {
+		return fail(err)
+	}
+	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "wait-ready").Get(ctx, nil)
+	var st engine.Status
+	if err := workflow.ExecuteActivity(waitOpts(ctx, ReadyTimeout), a.WaitForCondition, in.OperationID, in.ClusterID, gen, engine.Condition{Type: "Ready"}).Get(ctx, &st); err != nil {
+		return fail(err)
+	}
+	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "finish").Get(ctx, nil)
+	if err := workflow.ExecuteActivity(sctx, a.FinishUpdate, in.OperationID, in.ClusterID).Get(ctx, nil); err != nil {
+		return fail(err)
+	}
+	return nil
 }
 
 // Register adds workflows and activities to a worker.
 func Register(w worker.Registry, a *Activities) {
 	w.RegisterWorkflowWithOptions(CreateCluster, workflow.RegisterOptions{Name: "CreateCluster"})
 	w.RegisterWorkflowWithOptions(DeleteCluster, workflow.RegisterOptions{Name: "DeleteCluster"})
+	w.RegisterWorkflowWithOptions(UpdateCluster, workflow.RegisterOptions{Name: "UpdateCluster"})
 	w.RegisterActivity(a)
 }

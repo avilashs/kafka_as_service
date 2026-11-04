@@ -24,7 +24,7 @@ func okSpec() Spec {
 }
 
 var env = engine.CellEnv{CellID: "cell-1", Domain: "streams.example.net", Zones: []string{"a", "b", "c"},
-	StorageClass: "gp3", GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", APIServerCIDRs: []string{"10.0.0.1/32"}}
+	StorageClass: "gp3", GatewayName: "kafka-gateway", GatewayNS: "streamcell-gateway", GatewayDataPlaneNS: "envoy-gateway-system", APIServerCIDRs: []string{"10.0.0.1/32"}}
 
 func TestValidate(t *testing.T) {
 	e := New()
@@ -399,5 +399,49 @@ func TestObserveStatus(t *testing.T) {
 	}
 	if st, _ := e.ObserveStatus(rs, engine.Observed{Deleted: true}); !st.Deleted {
 		t.Fatal("deleted not reported")
+	}
+}
+
+// Every listener port is reachable only by whom it is meant for. Strimzi adds its own NetworkPolicy per
+// listener and opens the port to everyone unless networkPolicyPeers is set, so both listeners must set it.
+func TestListenersRestrictNetworkPeers(t *testing.T) {
+	b := render(t, engine.TierShared, okSpec())
+	k := find(b, "Kafka", "kc-0123456789")
+	if k == nil {
+		t.Fatal("no Kafka")
+	}
+	ls, _, _ := unstructured.NestedSlice(k.Object, "spec", "kafka", "listeners")
+	if len(ls) != 2 {
+		t.Fatalf("listeners = %d", len(ls))
+	}
+	for _, l := range ls {
+		m := l.(map[string]any)
+		peers, _ := m["networkPolicyPeers"].([]any)
+		if len(peers) != 1 {
+			t.Fatalf("listener %v has no networkPolicyPeers: it would be open to every pod", m["name"])
+		}
+		p := peers[0].(map[string]any)
+		switch m["name"] {
+		case "external":
+			ns := p["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]any)["kubernetes.io/metadata.name"]
+			if ns != "envoy-gateway-system" {
+				t.Errorf("external listener peer namespace = %v, want the gateway data-plane namespace", ns)
+			}
+			if _, ok := p["podSelector"].(map[string]any)["matchLabels"].(map[string]any)["gateway.envoyproxy.io/owning-gateway-name"]; !ok {
+				t.Error("external listener peer does not select the gateway's proxy pods")
+			}
+		case "tls":
+			if _, ok := p["namespaceSelector"]; ok {
+				t.Error("internal listener must not accept other namespaces")
+			}
+		}
+	}
+	np := find(b, "NetworkPolicy", "allow-gateway-ingress")
+	from, _, _ := unstructured.NestedSlice(np.Object, "spec", "ingress")
+	if len(from) != 1 {
+		t.Fatal("allow-gateway-ingress malformed")
+	}
+	if got := from[0].(map[string]any)["from"].([]any)[0].(map[string]any)["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]any)["kubernetes.io/metadata.name"]; got != "envoy-gateway-system" {
+		t.Errorf("allow-gateway-ingress namespace = %v", got)
 	}
 }

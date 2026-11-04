@@ -16,6 +16,7 @@ import (
 
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
 	"github.com/avilashs/kafka_as_service/internal/platform/ids"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -45,6 +46,7 @@ func (s StaticTokens) Tenant(r *http.Request) (string, error) {
 type Server struct {
 	Store   *store.Store
 	Engines *engine.Registry
+	Secrets secrets.Store
 	Auth    Authenticator
 	Log     *slog.Logger
 }
@@ -58,6 +60,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/clusters/{id}", s.authed(s.getCluster))
 	mux.HandleFunc("DELETE /v1/clusters/{id}", s.authed(s.deleteCluster))
 	mux.HandleFunc("GET /v1/clusters/{id}/bootstrap-brokers", s.authed(s.bootstrap))
+	mux.HandleFunc("GET /v1/clusters/{id}/ca-certificate", s.authed(s.caCertificate))
+	mux.HandleFunc("GET /v1/clusters/{id}/scram-users", s.authed(s.listUsers))
+	mux.HandleFunc("POST /v1/clusters/{id}/scram-users", s.authed(s.createUser))
+	mux.HandleFunc("DELETE /v1/clusters/{id}/scram-users/{name}", s.authed(s.deleteUser))
+	mux.HandleFunc("POST /v1/clusters/{id}/scram-users/{name}/rotate", s.authed(s.rotateUser))
+	mux.HandleFunc("GET /v1/clusters/{id}/scram-users/{name}/credentials", s.authed(s.userCredentials))
 	mux.HandleFunc("GET /v1/operations/{id}", s.authed(s.getOperation))
 	return mux
 }
@@ -114,7 +122,7 @@ type CreateClusterRequest struct {
 }
 
 func toCluster(c *store.Cluster) Cluster {
-	out := Cluster{ID: c.ID, Name: c.Name, Engine: c.Engine, Tier: string(c.Tier), State: c.State, Spec: c.Spec,
+	out := Cluster{ID: c.ID, Name: c.Name, Engine: c.Engine, Tier: string(c.Tier), State: c.State, Spec: withoutUsers(c.Spec),
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
 	if c.StateReason != nil {
 		out.StateReason = *c.StateReason
@@ -170,6 +178,10 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request, tenant st
 	tier := engine.Tier(req.Tier)
 	if tier != engine.TierShared && tier != engine.TierDedicated {
 		writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", `tier must be "shared" or "dedicated"`)
+		return
+	}
+	if hasUsers(req.Spec) {
+		writeErr(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "users are created with POST /v1/clusters/{id}/scram-users once the cluster is ACTIVE")
 		return
 	}
 	hash, err := canonicalHash(req)
@@ -333,4 +345,30 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, errCode, msg string) {
 	writeJSON(w, code, map[string]any{"error": map[string]string{"code": errCode, "message": msg}})
+}
+
+// withoutUsers hides the users a spec holds: they are managed (and shown) through the user endpoints.
+func withoutUsers(spec json.RawMessage) json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(spec, &m) != nil {
+		return spec
+	}
+	if _, ok := m["users"]; !ok {
+		return spec
+	}
+	delete(m, "users")
+	b, err := json.Marshal(m)
+	if err != nil {
+		return spec
+	}
+	return b
+}
+
+func hasUsers(spec json.RawMessage) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(spec, &m) != nil {
+		return false
+	}
+	_, ok := m["users"]
+	return ok
 }

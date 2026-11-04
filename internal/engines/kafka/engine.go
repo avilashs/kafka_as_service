@@ -23,6 +23,7 @@ type Spec struct {
 	BrokerCount  int               `json:"brokerCount"`
 	Storage      StorageSpec       `json:"storage"`
 	Config       map[string]string `json:"config,omitempty"`
+	Users        []User            `json:"users,omitempty"`
 }
 
 // StorageSpec is per-broker storage.
@@ -87,6 +88,9 @@ func (e *Engine) Validate(rs engine.ResourceSpec, prior *engine.ResourceSpec) er
 		return engine.Invalid("storage.autoExpand is not available on local NVMe broker types")
 	}
 	if err := ValidateConfig(s.Config); err != nil {
+		return err
+	}
+	if err := validateUsers(s.Users); err != nil {
 		return err
 	}
 	if prior != nil {
@@ -172,6 +176,13 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 	if kafkaObj == nil {
 		return engine.Status{Reason: "Kafka resource not reported"}, nil
 	}
+	for i := range obs.Objects {
+		if o := &obs.Objects[i]; o.Kind == "KafkaUser" {
+			if ready, why := resourceReady(o); !ready {
+				return engine.Status{Reason: fmt.Sprintf("KafkaUser %s: %s", o.Name, why)}, nil
+			}
+		}
+	}
 	var st struct {
 		ObservedGeneration int64 `json:"observedGeneration"`
 		Conditions         []struct {
@@ -216,4 +227,34 @@ func strictUnmarshal(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+// resourceReady reads a Strimzi resource's Ready condition for its current generation.
+func resourceReady(o *engine.ObjectStatus) (bool, string) {
+	var st struct {
+		ObservedGeneration int64 `json:"observedGeneration"`
+		Conditions         []struct {
+			Type    string `json:"type"`
+			Status  string `json:"status"`
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"conditions"`
+	}
+	if len(o.Status) > 0 {
+		if err := json.Unmarshal(o.Status, &st); err != nil {
+			return false, "unparseable status"
+		}
+	}
+	if st.ObservedGeneration < o.Generation {
+		return false, "not yet reconciled"
+	}
+	for _, c := range st.Conditions {
+		if c.Type == "Ready" {
+			if c.Status == "True" {
+				return true, ""
+			}
+			return false, c.Reason + " " + c.Message
+		}
+	}
+	return false, "no Ready condition yet"
 }

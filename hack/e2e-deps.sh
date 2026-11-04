@@ -17,6 +17,8 @@ TEMPORAL_CLI_SHA256=521f461f3d108902763bb71e85cd0fd382dc9357b59604ae03da6ae734d1
 ENVTEST_K8S_VERSION=1.34.1
 ENVTEST_SHA512=c5e7c237ae18a8c65d0df1214b864ecd19aa9ff4f1383dbd477c202546d778c0f74efe15750ec38f57d8de26ba17cd62f404446cdd3c975399a5d4589de35cdd
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:17}"
+OPENBAO_IMAGE="${OPENBAO_IMAGE:-openbao/openbao:2.4.0}"
+BAO_PORT="${BAO_PORT:-58200}"
 PG_PORT="${PG_PORT:-55432}"
 TEMPORAL_PORT="${TEMPORAL_PORT:-57233}"
 
@@ -49,6 +51,17 @@ up() {
     docker exec streamcell-e2e-pg pg_isready -U postgres >/dev/null 2>&1 && break
     sleep 1
   done
+  # OpenBao in dev mode (in-memory, KV v2 at secret/) as the secret manager for tests.
+  if ! docker inspect streamcell-e2e-bao >/dev/null 2>&1; then
+    docker run -d --name streamcell-e2e-bao --cap-add=IPC_LOCK -p "127.0.0.1:${BAO_PORT}:8200" "$OPENBAO_IMAGE" \
+      server -dev -dev-root-token-id=e2e-root -dev-listen-address=0.0.0.0:8200 >/dev/null
+  elif [[ "$(docker inspect -f '{{.State.Running}}' streamcell-e2e-bao)" != true ]]; then
+    docker start streamcell-e2e-bao >/dev/null
+  fi
+  for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:${BAO_PORT}/v1/sys/health" >/dev/null 2>&1 && break
+    sleep 1
+  done
   if ! curl -s "http://127.0.0.1:$((TEMPORAL_PORT + 1000))" >/dev/null 2>&1; then
     nohup "$BIN/temporal" server start-dev --headless --ip 127.0.0.1 --port "$TEMPORAL_PORT" \
       --ui-port "$((TEMPORAL_PORT + 1000))" --log-level warn >"$CACHE/temporal.log" 2>&1 &
@@ -61,10 +74,12 @@ up() {
   echo "export STREAMCELL_E2E_DATABASE_URL=postgres://postgres:e2e@127.0.0.1:${PG_PORT}/postgres?sslmode=disable"
   echo "export STREAMCELL_E2E_TEMPORAL=127.0.0.1:${TEMPORAL_PORT}"
   echo "export KUBEBUILDER_ASSETS=$CACHE/envtest"
+  echo "export STREAMCELL_E2E_OPENBAO_ADDR=http://127.0.0.1:${BAO_PORT}"
+  echo "export STREAMCELL_E2E_OPENBAO_TOKEN=e2e-root"
 }
 
 down() {
-  docker rm -f streamcell-e2e-pg >/dev/null 2>&1 || true
+  docker rm -f streamcell-e2e-pg streamcell-e2e-bao >/dev/null 2>&1 || true
   if [[ -f "$CACHE/temporal.pid" ]]; then kill "$(cat "$CACHE/temporal.pid")" 2>/dev/null || true; rm -f "$CACHE/temporal.pid"; fi
 }
 

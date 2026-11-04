@@ -83,10 +83,15 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 					map[string]any{
 						"name": "tls", "port": InternalTLSPort, "type": "internal", "tls": true,
 						"authentication": map[string]any{"type": "tls"},
+						// Only pods of this cluster's namespace (entity operator, Cruise Control). Without
+						// peers Strimzi would add a NetworkPolicy that opens the port to every pod.
+						"networkPolicyPeers": []any{map[string]any{"podSelector": map[string]any{}}},
 					},
 					map[string]any{
 						"name": "external", "port": ExternalPort, "type": "tlsroute", "tls": true,
 						"authentication": map[string]any{"type": "scram-sha-512"},
+						// Only the gateway's proxy pods. Strimzi would otherwise open the port to everyone.
+						"networkPolicyPeers": gatewayPeers(env),
 						"configuration": map[string]any{
 							"bootstrap":    map[string]any{"host": host("bootstrap")},
 							"hostTemplate": host("b{nodeId}"),
@@ -154,6 +159,8 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	}
 
 	objs = append(objs, kafka, controllers, brokers)
+	userObjs, userSecrets := renderUsers(rs.ID, env.CellID, s, common)
+	objs = append(objs, userObjs...)
 
 	b := &engine.Bundle{}
 	for _, o := range objs {
@@ -164,6 +171,10 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 		b.Objects = append(b.Objects, u)
 	}
 	b.DeleteGraceSeconds = 20
+	b.Secrets = userSecrets
+	// The cluster CA certificate is public; tenants need it to trust the brokers.
+	b.Outputs = []engine.Output{{Name: "cluster-ca.crt", APIVersion: "v1", Kind: "Secret", Namespace: rs.ID,
+		ObjectName: rs.ID + "-cluster-ca-cert", Key: "ca.crt"}}
 	if rs.Tier == engine.TierDedicated {
 		zones := a.GroupZones["brokers"]
 		if len(zones) == 0 {
@@ -422,12 +433,26 @@ func netpolGatewayIngress(ns string, common map[string]any, env engine.CellEnv) 
 		"podSelector": map[string]any{"matchLabels": map[string]any{LabelRole: RoleBroker}},
 		"policyTypes": []any{"Ingress"},
 		"ingress": []any{map[string]any{
-			"from": []any{map[string]any{"namespaceSelector": map[string]any{
-				"matchLabels": map[string]any{"kubernetes.io/metadata.name": env.GatewayNS},
-			}}},
+			"from":  gatewayPeers(env),
 			"ports": []any{map[string]any{"protocol": "TCP", "port": ExternalPort}},
 		}},
 	})
+}
+
+// gatewayPeers selects the gateway's data-plane pods: the only clients allowed to reach the external
+// listener from outside the namespace. Envoy Gateway labels its proxy pods with the owning Gateway.
+func gatewayPeers(env engine.CellEnv) []any {
+	ns := env.GatewayDataPlaneNS
+	if ns == "" {
+		ns = env.GatewayNS
+	}
+	return []any{map[string]any{
+		"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": ns}},
+		"podSelector": map[string]any{"matchLabels": map[string]any{
+			"gateway.envoyproxy.io/owning-gateway-name":      env.GatewayName,
+			"gateway.envoyproxy.io/owning-gateway-namespace": env.GatewayNS,
+		}},
+	}}
 }
 
 func netpolAPIServer(ns string, common map[string]any, cidrs []string) map[string]any {

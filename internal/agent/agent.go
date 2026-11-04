@@ -10,6 +10,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/avilashs/kafka_as_service/internal/cloud"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -117,6 +119,9 @@ type Agent struct {
 	// Pools provisions dedicated node pools. Nil means the cell has none: bundles that
 	// ask for one then report an apply error instead of silently running unplaced.
 	Pools cloud.NodePoolProvider
+	// Secrets resolves the references in bundle.Secrets. Nil means the cell has no secret manager:
+	// a bundle that needs a secret then reports an apply error.
+	Secrets secrets.Store
 
 	applyMu  sync.Mutex // serialises apply/delete of bundles (poll loop vs resync)
 	mu       sync.Mutex // guards the fields below
@@ -474,7 +479,32 @@ func (a *Agent) resource(ref ObjectRef) (dynamic.ResourceInterface, error) {
 // apply server-side-applies objects in bundle order.
 func (a *Agent) apply(ctx context.Context, b *engine.Bundle) ([]ObjectRef, error) {
 	var refs []ObjectRef
+	// Secrets are created as soon as their namespace exists, before the other objects of that
+	// namespace, so that objects which reference them (KafkaUser passwords) find them at once.
+	secretsDone := map[string]bool{}
+	applySecrets := func(ns string) error {
+		if secretsDone[ns] {
+			return nil
+		}
+		secretsDone[ns] = true
+		for _, m := range b.Secrets {
+			if m.Namespace != ns {
+				continue
+			}
+			ref, err := a.applySecret(ctx, m)
+			if err != nil {
+				return err
+			}
+			refs = append(refs, ref)
+		}
+		return nil
+	}
 	for _, o := range b.Objects {
+		if o.GetKind() != "Namespace" {
+			if err := applySecrets(o.GetNamespace()); err != nil {
+				return refs, err
+			}
+		}
 		ref := refOf(o)
 		ri, err := a.resource(ref)
 		if err != nil {
@@ -490,7 +520,67 @@ func (a *Agent) apply(ctx context.Context, b *engine.Bundle) ([]ObjectRef, error
 		}
 		refs = append(refs, ref)
 	}
+	for _, m := range b.Secrets { // namespaces that had no other object
+		if err := applySecrets(m.Namespace); err != nil {
+			return refs, err
+		}
+	}
 	return refs, nil
+}
+
+// applySecret resolves the references of m from the secret manager and writes the Kubernetes
+// Secret. Values are never logged and never leave this function except into the Secret.
+func (a *Agent) applySecret(ctx context.Context, m engine.SecretMaterial) (ObjectRef, error) {
+	ref := ObjectRef{APIVersion: "v1", Kind: "Secret", Namespace: m.Namespace, Name: m.Name}
+	if a.Secrets == nil {
+		return ref, fmt.Errorf("secret %s/%s needs a secret manager, but this cell has none configured", m.Namespace, m.Name)
+	}
+	data := map[string]any{}
+	for key, r := range m.Data {
+		vals, _, err := a.Secrets.Get(ctx, r.Path)
+		if err != nil {
+			return ref, fmt.Errorf("secret %s/%s: resolving %s: %w", m.Namespace, m.Name, r.Path, err)
+		}
+		v, ok := vals[r.Key]
+		if !ok {
+			return ref, fmt.Errorf("secret %s/%s: %s has no field %q", m.Namespace, m.Name, r.Path, r.Key)
+		}
+		data[key] = base64.StdEncoding.EncodeToString([]byte(v))
+	}
+	lbls := map[string]any{}
+	for k, v := range m.Labels {
+		lbls[k] = v
+	}
+	obj := map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+		"metadata": map[string]any{"name": m.Name, "namespace": m.Namespace, "labels": lbls}, "data": data}
+	raw, _ := json.Marshal(obj)
+	force := true
+	if _, err := a.Kube.CoreV1().Secrets(m.Namespace).Patch(ctx, m.Name, types.ApplyPatchType, raw, metav1.PatchOptions{FieldManager: FieldManager, Force: &force}); err != nil {
+		return ref, fmt.Errorf("apply Secret %s/%s: %w", m.Namespace, m.Name, err)
+	}
+	return ref, nil
+}
+
+// readOutputs reads the public values the bundle asked to publish. A missing object is not an
+// error: the value simply is not there yet (for example the CA before the operator created it).
+func (a *Agent) readOutputs(ctx context.Context, b *engine.Bundle) map[string]string {
+	if b == nil || len(b.Outputs) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, o := range b.Outputs {
+		if o.Kind != "Secret" || o.APIVersion != "v1" {
+			continue // only Secrets (of public material) are supported
+		}
+		sec, err := a.Kube.CoreV1().Secrets(o.Namespace).Get(ctx, o.ObjectName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if v, ok := sec.Data[o.Key]; ok {
+			out[o.Name] = string(v)
+		}
+	}
+	return out
 }
 
 // prune deletes objects this cluster previously applied that are absent from the new bundle.
@@ -628,6 +718,7 @@ func (a *Agent) reportStatus(ctx context.Context) {
 			for _, r := range s.refs {
 				obs.Objects = append(obs.Objects, a.observe(ctx, r))
 			}
+			obs.Outputs = a.readOutputs(ctx, s.cs.bundle)
 		}
 		reports = append(reports, store.StatusReport{ClusterID: s.id, Observed: obs})
 	}

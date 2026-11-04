@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: Streamcell API
-  version: 0.1.0-m1
+  version: 0.1.0-m3
   description: |
     Tenant API for managed Apache Kafka clusters. Every mutation is asynchronous,
     requires an `Idempotency-Key` header, and returns an `Operation`.
-    M1 scope: create, list, describe and delete shared-tier clusters; operations; bootstrap endpoints.
+    Scope: clusters (shared and dedicated tiers), operations, bootstrap endpoints, SCRAM users and the cluster CA certificate.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -96,6 +96,110 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/ca-certificate:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+    get:
+      operationId: getCaCertificate
+      summary: PEM CA certificate that clients must trust for this cluster
+      description: Every cluster has its own CA. The certificate is public; give it to the client truststore (`ssl.truststore.certificates`).
+      responses:
+        '200':
+          description: PEM certificate
+          content:
+            application/x-pem-file:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/scram-users:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+    get:
+      operationId: listScramUsers
+      summary: List SCRAM users (never includes passwords)
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: '#/components/schemas/ScramUser' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createScramUser
+      summary: Create a SCRAM-SHA-512 user
+      description: The platform generates a 256-bit password; read it with the credentials endpoint once the operation has succeeded.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateScramUserRequest' }
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/scram-users/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+      - $ref: '#/components/parameters/UserName'
+    delete:
+      operationId: deleteScramUser
+      summary: Delete a SCRAM user
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/scram-users/{name}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+      - $ref: '#/components/parameters/UserName'
+    post:
+      operationId: rotateScramUser
+      summary: Replace a user's password with a new random one
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { $ref: '#/components/responses/Operation' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/clusters/{id}/scram-users/{name}/credentials:
+    parameters:
+      - $ref: '#/components/parameters/ClusterID'
+      - $ref: '#/components/parameters/UserName'
+    get:
+      operationId: getScramCredentials
+      summary: Read a user's current password
+      description: The password is read from the secret manager on every call and is never stored in the platform database. The response is not cacheable.
+      responses:
+        '200':
+          description: Credentials
+          headers:
+            Cache-Control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScramCredentials' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
   /v1/operations/{id}:
     parameters:
       - name: id
@@ -132,6 +236,11 @@ components:
       required: true
       description: Client-chosen key, scoped to the tenant, kept 7 days. Same key and body replays the original operation; same key with a different body returns 422.
       schema: { type: string, minLength: 1, maxLength: 255 }
+    UserName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z][a-z0-9-]{0,30}[a-z0-9]$' }
     ClusterID:
       name: id
       in: path
@@ -199,13 +308,60 @@ components:
         currentOperationId: { type: string }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    ACL:
+      type: object
+      additionalProperties: false
+      required: [resource, operations]
+      properties:
+        resource:
+          type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: { type: string, enum: [topic, group, transactionalId, cluster] }
+            name: { type: string }
+            patternType: { type: string, enum: [literal, prefix] }
+        operations:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: 'Cluster ACLs may only grant Describe, DescribeConfigs, Create and IdempotentWrite.'
+    CreateScramUserRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, pattern: '^[a-z][a-z0-9-]{0,30}[a-z0-9]$', description: 'Names starting with "platform" are reserved.' }
+        admin: { type: boolean, description: 'Full control of topics, groups and transactional ids, plus the cluster-level operations a client needs; nothing that touches the brokers.' }
+        acls:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/ACL' }
+    ScramUser:
+      type: object
+      required: [name, mechanism, admin, acls]
+      properties:
+        name: { type: string }
+        mechanism: { type: string, enum: [SCRAM-SHA-512] }
+        admin: { type: boolean }
+        acls:
+          type: array
+          items: { $ref: '#/components/schemas/ACL' }
+    ScramCredentials:
+      type: object
+      required: [username, password, mechanism, secretVersion]
+      properties:
+        username: { type: string }
+        password: { type: string }
+        mechanism: { type: string, enum: [SCRAM-SHA-512] }
+        secretVersion: { type: integer }
     Operation:
       type: object
       required: [id, clusterId, type, state, createdAt, updatedAt]
       properties:
         id: { type: string }
         clusterId: { type: string }
-        type: { type: string, enum: [CreateCluster, DeleteCluster] }
+        type: { type: string, enum: [CreateCluster, DeleteCluster, CreateScramUser, RotateScramUser, DeleteScramUser] }
         state: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
         step: { type: string }
         error:

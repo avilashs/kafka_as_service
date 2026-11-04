@@ -4,6 +4,9 @@ package workflows
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/avilashs/kafka_as_service/internal/platform/capacity"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -50,6 +54,8 @@ type Activities struct {
 	Store     *store.Store
 	Allocator *capacity.Allocator
 	Engines   *engine.Registry
+	// Secrets is the secret manager. Passwords are generated here and never written to the database.
+	Secrets secrets.Store
 	// PollInterval controls how often WaitFor checks observed status.
 	PollInterval time.Duration
 }
@@ -65,6 +71,10 @@ const (
 	ActFailCreate       = "FailCreate"
 	ActFinishDelete     = "FinishDelete"
 	ActFailDelete       = "FailDelete"
+	ActPrepareUpdate    = "PrepareUpdate"
+	ActFinishUpdate     = "FinishUpdate"
+	ActFailUpdate       = "FailUpdate"
+	ActDeleteSecrets    = "DeleteClusterSecrets"
 )
 
 // MarkStep records progress on the operation.
@@ -96,11 +106,15 @@ func (a *Activities) ReserveCapacity(ctx context.Context, opID, clusterID string
 	return as, classify(faultPoint(ActReserve, nil))
 }
 
-// RenderAndPublish renders generation gen and appends it to the cell's desired state.
+// RenderAndPublish renders the cluster's current spec and appends it to the cell's desired state as
+// generation gen; gen 0 means "the spec's own generation" (used by updates). It returns the generation.
 func (a *Activities) RenderAndPublish(ctx context.Context, opID, clusterID string, gen int64) (int64, error) {
 	c, err := a.Store.ClusterByID(ctx, clusterID)
 	if err != nil {
 		return 0, classify(err)
+	}
+	if gen == 0 {
+		gen = c.SpecGeneration
 	}
 	if c.Assignment == nil {
 		return 0, Terminal(fmt.Errorf("cluster %s has no assignment", clusterID))
@@ -117,11 +131,10 @@ func (a *Activities) RenderAndPublish(ctx context.Context, opID, clusterID strin
 	if err != nil {
 		return 0, Terminal(err)
 	}
-	rev, err := a.Store.PublishDesired(ctx, opID, clusterID, gen, b, false)
-	if err != nil {
+	if _, err := a.Store.PublishDesired(ctx, opID, clusterID, gen, b, false); err != nil {
 		return 0, classify(err)
 	}
-	return rev, classify(faultPoint(ActRenderPublish, nil))
+	return gen, classify(faultPoint(ActRenderPublish, nil))
 }
 
 // PublishTombstone publishes a delete marker one generation above the latest
@@ -243,4 +256,131 @@ func (a *Activities) FinishDelete(ctx context.Context, opID, clusterID string) e
 // FailDelete completes a failed delete.
 func (a *Activities) FailDelete(ctx context.Context, opID, clusterID string, e store.OpError) error {
 	return classify(a.Store.FailDelete(ctx, opID, clusterID, e))
+}
+
+// ---------- updates (users today; resize, upgrade and configuration in M4) ----------
+
+// updateRequest is what the API stores in operations.request for an UpdateCluster operation.
+type updateRequest struct {
+	Action string `json:"action"` // user.create | user.rotate | user.delete
+	User   string `json:"user,omitempty"`
+}
+
+func (a *Activities) loadUpdate(ctx context.Context, opID string) (updateRequest, error) {
+	raw, err := a.Store.OperationRequest(ctx, opID)
+	if err != nil {
+		return updateRequest{}, err
+	}
+	var r updateRequest
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return r, Terminal(fmt.Errorf("unreadable update request: %w", err))
+	}
+	return r, nil
+}
+
+func (a *Activities) userManager(c *store.Cluster) (engine.UserManager, error) {
+	e, err := a.Engines.Get(c.Engine)
+	if err != nil {
+		return nil, err
+	}
+	um, ok := e.(engine.UserManager)
+	if !ok {
+		return nil, Terminal(fmt.Errorf("engine %s has no users", c.Engine))
+	}
+	return um, nil
+}
+
+// GeneratePassword returns a 256-bit random password in a URL-safe alphabet, so that it needs no
+// escaping in a JAAS configuration or a properties file.
+func GeneratePassword() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// PrepareUpdate creates (user.create) or replaces (user.rotate) the secret a user needs and records
+// its version in the cluster spec. It is safe to re-run: user.create keeps an existing secret.
+func (a *Activities) PrepareUpdate(ctx context.Context, opID, clusterID string) error {
+	req, err := a.loadUpdate(ctx, opID)
+	if err != nil {
+		return classify(err)
+	}
+	if req.Action != "user.create" && req.Action != "user.rotate" {
+		return nil
+	}
+	c, err := a.Store.ClusterByID(ctx, clusterID)
+	if err != nil {
+		return classify(err)
+	}
+	if c.CellID == nil {
+		return Terminal(fmt.Errorf("cluster %s has no cell", clusterID))
+	}
+	um, err := a.userManager(c)
+	if err != nil {
+		return classify(err)
+	}
+	path := secrets.UserPath(*c.CellID, clusterID, req.User)
+	var version int
+	if req.Action == "user.create" {
+		if _, v, err := a.Secrets.Get(ctx, path); err == nil {
+			version = v
+		} else if !errors.Is(err, secrets.ErrNotFound) {
+			return err
+		}
+	}
+	if version == 0 {
+		pw, err := GeneratePassword()
+		if err != nil {
+			return err
+		}
+		if version, err = a.Secrets.Put(ctx, path, map[string]string{"password": pw}); err != nil {
+			return err
+		}
+	}
+	return classify(a.Store.MutateSpecUnderLock(ctx, opID, clusterID, func(spec json.RawMessage) (json.RawMessage, error) {
+		return um.SetUserSecretVersion(spec, req.User, version)
+	}))
+}
+
+// FinishUpdate removes the secret of a deleted user and completes the operation.
+func (a *Activities) FinishUpdate(ctx context.Context, opID, clusterID string) error {
+	req, err := a.loadUpdate(ctx, opID)
+	if err != nil {
+		return classify(err)
+	}
+	if req.Action == "user.delete" {
+		c, err := a.Store.ClusterByID(ctx, clusterID)
+		if err != nil {
+			return classify(err)
+		}
+		if c.CellID != nil {
+			if err := a.Secrets.Delete(ctx, secrets.UserPath(*c.CellID, clusterID, req.User)); err != nil {
+				return err
+			}
+		}
+	}
+	return classify(faultPoint(ActFinishUpdate, a.Store.FinishUpdate(ctx, opID, clusterID, req.Action)))
+}
+
+// FailUpdate completes an update as failed.
+func (a *Activities) FailUpdate(ctx context.Context, opID, clusterID string, e store.OpError) error {
+	req, err := a.loadUpdate(ctx, opID)
+	if err != nil {
+		req = updateRequest{Action: "update"}
+	}
+	return classify(a.Store.FailUpdate(ctx, opID, clusterID, req.Action, e))
+}
+
+// DeleteClusterSecrets removes everything the cluster keeps in the secret manager. Idempotent.
+func (a *Activities) DeleteClusterSecrets(ctx context.Context, clusterID string) error {
+	c, err := a.Store.ClusterByID(ctx, clusterID)
+	if err != nil {
+		return classify(err)
+	}
+	if c.CellID == nil || a.Secrets == nil {
+		return nil
+	}
+	return a.Secrets.Delete(ctx, secrets.ClusterPrefix(*c.CellID, clusterID))
 }

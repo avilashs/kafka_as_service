@@ -15,6 +15,7 @@ import (
 	"github.com/avilashs/kafka_as_service/internal/engines/kafka"
 	"github.com/avilashs/kafka_as_service/internal/platform/capacity"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 	"github.com/avilashs/kafka_as_service/internal/platform/workflows"
 )
@@ -58,9 +59,14 @@ func main() {
 	if d, err := time.ParseDuration(os.Getenv("STREAMCELL_POLL_INTERVAL")); err == nil {
 		poll = d
 	}
+	sec, err := secrets.FromEnv()
+	if err != nil {
+		log.Error("secrets", "err", err)
+		os.Exit(1)
+	}
 	w := worker.New(tc, workflows.TaskQueue, worker.Options{})
 	workflows.Register(w, &workflows.Activities{
-		Store: st, Allocator: &capacity.Allocator{Store: st}, Engines: engine.NewRegistry(kafka.New()), PollInterval: poll,
+		Store: st, Allocator: &capacity.Allocator{Store: st}, Engines: engine.NewRegistry(kafka.New()), PollInterval: poll, Secrets: sec,
 	})
 	log.Info("worker starting", "taskQueue", workflows.TaskQueue)
 	if err := w.Run(interruptCh(ctx)); err != nil {

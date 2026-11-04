@@ -15,6 +15,7 @@ import (
 	"github.com/avilashs/kafka_as_service/internal/agent"
 	awsprov "github.com/avilashs/kafka_as_service/internal/cloud/aws"
 	kindprov "github.com/avilashs/kafka_as_service/internal/cloud/kind"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 )
 
 func main() {
@@ -39,6 +40,10 @@ func main() {
 	a, err := agent.New(rc, &agent.CPClient{BaseURL: os.Getenv("CONTROL_PLANE_URL"), Token: os.Getenv("CELL_TOKEN")}, cfg, log)
 	if err != nil {
 		log.Error("agent", "err", err)
+		os.Exit(1)
+	}
+	if a.Secrets, err = secrets.FromEnv(); err != nil {
+		log.Error("secrets", "err", err)
 		os.Exit(1)
 	}
 	switch prov := os.Getenv("NODEPOOL_PROVIDER"); prov {

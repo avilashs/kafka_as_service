@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 )
 
 // Tier is the placement tier of a resource.
@@ -107,12 +109,15 @@ type CellEnv struct {
 	// LocalStorageClass provisions local NVMe volumes (dedicated NVMe sizes only).
 	LocalStorageClass string `json:"localStorageClass,omitempty"`
 	// APIServerCIDRs are allowed as egress targets (Strimzi init container, operators).
-	APIServerCIDRs []string          `json:"apiServerCIDRs,omitempty"`
-	GatewayName    string            `json:"gatewayName"`
-	GatewayNS      string            `json:"gatewayNamespace"`
-	LabelPrefix    string            `json:"labelPrefix"`
-	EngineImages   map[string]string `json:"engineImages,omitempty"`
-	OperatorShards int               `json:"operatorShards"`
+	APIServerCIDRs []string `json:"apiServerCIDRs,omitempty"`
+	GatewayName    string   `json:"gatewayName"`
+	GatewayNS      string   `json:"gatewayNamespace"`
+	// GatewayDataPlaneNS is where the gateway implementation runs the proxy pods that carry client
+	// traffic (Envoy Gateway: its own namespace, not the Gateway object's). Defaults to GatewayNS.
+	GatewayDataPlaneNS string            `json:"gatewayDataPlaneNamespace,omitempty"`
+	LabelPrefix        string            `json:"labelPrefix"`
+	EngineImages       map[string]string `json:"engineImages,omitempty"`
+	OperatorShards     int               `json:"operatorShards"`
 	// DedicatedSurge is the number of extra nodes a dedicated pool may temporarily hold during rotation.
 	DedicatedSurge int `json:"dedicatedSurge,omitempty"`
 }
@@ -144,10 +149,35 @@ func (n NodePoolSpec) TotalNodes() int {
 	return t
 }
 
+// SecretMaterial asks the cell agent to create a Kubernetes Secret whose values come from the
+// secret manager. The bundle carries references only; the database never sees the values.
+type SecretMaterial struct {
+	Namespace string                 `json:"namespace"`
+	Name      string                 `json:"name"`
+	Labels    map[string]string      `json:"labels,omitempty"`
+	Data      map[string]secrets.Ref `json:"data"` // Secret data key -> where the value is
+}
+
+// Output names one piece of public data the agent reads back from the cell and reports in its
+// status (for example the cluster CA certificate). Only public material may be published this way.
+type Output struct {
+	Name       string `json:"name"`
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Namespace  string `json:"namespace"`
+	ObjectName string `json:"objectName"`
+	Key        string `json:"key"`
+}
+
 // Bundle is the complete rendered desired state of one resource in one cell.
 // Objects are applied in slice order and deleted in reverse order.
 type Bundle struct {
 	Objects []*unstructured.Unstructured `json:"objects"`
+	// Secrets are materialised in the cell, right after the namespace they live in is created and
+	// before any other object of that namespace.
+	Secrets []SecretMaterial `json:"secrets,omitempty"`
+	// Outputs are public values the agent reports back in Observed.Outputs.
+	Outputs []Output `json:"outputs,omitempty"`
 	// NodePools are provisioned before Objects are applied and released, after all
 	// pods are gone, when the resource is deleted.
 	NodePools []NodePoolSpec `json:"nodePools,omitempty"`
@@ -188,11 +218,12 @@ type ObjectStatus struct {
 
 // Observed is the raw observation of a resource, as reported by the cell agent.
 type Observed struct {
-	Generation int64          `json:"generation"` // bundle generation the agent last applied
-	Deleted    bool           `json:"deleted"`    // tombstone fully applied
-	Objects    []ObjectStatus `json:"objects"`
-	Probe      map[string]any `json:"probe,omitempty"`
-	ApplyError string         `json:"applyError,omitempty"`
+	Generation int64             `json:"generation"` // bundle generation the agent last applied
+	Deleted    bool              `json:"deleted"`    // tombstone fully applied
+	Objects    []ObjectStatus    `json:"objects"`
+	Probe      map[string]any    `json:"probe,omitempty"`
+	Outputs    map[string]string `json:"outputs,omitempty"`
+	ApplyError string            `json:"applyError,omitempty"`
 }
 
 // Status is the engine's interpretation of an observation.
@@ -226,10 +257,31 @@ type Engine interface {
 	ObserveStatus(spec ResourceSpec, obs Observed) (Status, error)
 }
 
+// UserManager is implemented by engines whose resources have client users (Kafka: SCRAM users).
+// All methods are pure transformations of the engine's opaque spec, so the platform can run them
+// inside the transaction that takes the per-resource lock.
+type UserManager interface {
+	// AddUser adds the user described by req (engine-specific JSON) and returns the new spec and the user's name.
+	AddUser(spec json.RawMessage, req json.RawMessage) (newSpec json.RawMessage, name string, err error)
+	// RemoveUser removes a user.
+	RemoveUser(spec json.RawMessage, name string) (json.RawMessage, error)
+	// RotateUser marks the user's secret as changed, which makes the rendered state change.
+	RotateUser(spec json.RawMessage, name string) (json.RawMessage, error)
+	// SetUserSecretVersion records which secret version the user's rendered state refers to.
+	SetUserSecretVersion(spec json.RawMessage, name string, version int) (json.RawMessage, error)
+	// ListUsers returns the public view of the users (never credentials).
+	ListUsers(spec json.RawMessage) (json.RawMessage, error)
+}
+
 // ValidationError is returned by Validate for user-correctable problems.
 type ValidationError struct{ Msg string }
 
 func (e *ValidationError) Error() string { return e.Msg }
+
+// NotFoundError is returned by UserManager when a named sub-resource (for example a user) does not exist.
+type NotFoundError struct{ What string }
+
+func (e *NotFoundError) Error() string { return e.What + " not found" }
 
 // Invalid builds a ValidationError.
 func Invalid(format string, args ...any) error {
