@@ -72,6 +72,7 @@ class PlatformAuthorizerTest {
         for (ResourceType t : new ResourceType[] {ResourceType.TOPIC, ResourceType.GROUP, ResourceType.TRANSACTIONAL_ID}) {
             assertTrue(denied(api, AclOperation.READ, t, "__consumer_offsets"));
             assertTrue(denied(api, AclOperation.DESCRIBE, t, "__platform-canary"));
+            assertTrue(denied(api, AclOperation.WRITE, t, "strimzi.cruisecontrol.metrics"));
             assertFalse(denied(api, AclOperation.READ, t, "orders"));
             assertFalse(denied(api, AclOperation.READ, t, "a__b"));
         }
@@ -104,6 +105,7 @@ class PlatformAuthorizerTest {
         // reserved names
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "__consumer_offsets", PatternType.LITERAL, "User:app", "*", AclOperation.READ)));
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "__", PatternType.PREFIXED, "User:app", "*", AclOperation.READ)));
+        assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "strimzi.cruisecontrol.metrics", PatternType.LITERAL, "User:app", "*", AclOperation.READ)));
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "", PatternType.PREFIXED, "User:app", "*", AclOperation.READ)));
         // platform principals
         assertNotNull(a.rejectBinding(binding(ResourceType.TOPIC, "orders", PatternType.LITERAL, "User:broker", "*", AclOperation.READ)));
@@ -132,6 +134,8 @@ class PlatformAuthorizerTest {
         p.configure(Map.of());
         p.validate(create("orders", 12, (short) 3, Map.of("retention.ms", "86400000", "min.insync.replicas", "2")));
         p.validate(create("__CruiseControlMetrics", 32, (short) 1, Map.of("anything", "goes"))); // platform topics are exempt
+        // Strimzi's Cruise Control topics: this is what the kind run showed the real operator asks for
+        p.validate(create("strimzi.cruisecontrol.metrics", 1, (short) 3, Map.of("cleanup.policy", "delete", "retention.ms", "3600000", "segment.bytes", "51200", "max.message.bytes", "1048588")));
         assertThrows(PolicyViolationException.class, () -> p.validate(create("t", 1, (short) 2, Map.of())));
         assertThrows(PolicyViolationException.class, () -> p.validate(create("t", 1001, (short) 3, Map.of())));
         assertThrows(PolicyViolationException.class, () -> p.validate(create("t", 1, (short) 3, Map.of("unclean.leader.election.enable", "true"))));

@@ -7,8 +7,8 @@ import org.apache.kafka.server.policy.CreateTopicPolicy;
 
 /**
  * Bounds what a tenant can ask for when creating a topic. It runs on the controllers (KRaft), so the jar
- * must be in the controller image too. Topics whose name starts with "__" are the platform's own (Cruise
- * Control metrics, canaries) and are not restricted.
+ * must be in the controller image too. Topics whose name starts with "__" or "strimzi." are the platform's own (Cruise
+ * Control metrics, canaries; tenants cannot create them, the authorizer denies it) and are not restricted.
  *
  * <p>Broker settings read: {@code streamcell.topic.min.replication.factor} (default 3),
  * {@code streamcell.topic.max.partitions} (default 1000).
@@ -30,7 +30,7 @@ public class PlatformCreateTopicPolicy implements CreateTopicPolicy {
 
     @Override
     public void validate(RequestMetadata r) throws PolicyViolationException {
-        if (r.topic() != null && r.topic().startsWith(PlatformAuthorizer.RESERVED_PREFIX)) return;
+        if (r.topic() != null && PlatformAuthorizer.reserved(r.topic())) return;
         int partitions = r.numPartitions() != null ? r.numPartitions() : r.replicasAssignments().size();
         if (partitions > maxPartitions) {
             throw new PolicyViolationException("a topic may have at most " + maxPartitions + " partitions, requested " + partitions);

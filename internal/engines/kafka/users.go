@@ -190,8 +190,8 @@ func validateACL(a ACL) error {
 	if !resourceNameRE.MatchString(a.Resource.Name) {
 		return fmt.Errorf("resource name %q is invalid", a.Resource.Name)
 	}
-	if strings.HasPrefix(a.Resource.Name, reservedPrefix) {
-		return fmt.Errorf("resource names starting with %q are reserved for the platform", reservedPrefix)
+	if strings.HasPrefix(a.Resource.Name, reservedPrefix) || strings.HasPrefix(a.Resource.Name, "strimzi.") {
+		return fmt.Errorf("resource names starting with %q or \"strimzi.\" are reserved for the platform", reservedPrefix)
 	}
 	if pt := a.Resource.PatternType; pt != "" && pt != "literal" && pt != "prefix" {
 		return fmt.Errorf("patternType must be literal or prefix")

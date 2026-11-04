@@ -49,7 +49,7 @@ done
 chmod 644 "$TMP"/*
 
 docker rm -f "$NAME" >/dev/null 2>&1
-docker run -d --name "$NAME" --network host -v "$TMP:/it:ro" -v "$JAR:/opt/kafka/libs/streamcell-kafka-plugins.jar:ro" \
+docker run -d --name "$NAME" --network host -e LOG_DIR=/tmp/kafka-logs -v "$TMP:/it:ro" -v "$JAR:/opt/kafka/libs/streamcell-kafka-plugins.jar:ro" \
   --entrypoint bash "$KAFKA_IMAGE" -c '
     cp /it/server.properties /tmp/server.properties &&
     /opt/kafka/bin/kafka-storage.sh format -t "$(/opt/kafka/bin/kafka-storage.sh random-uuid)" -c /tmp/server.properties &&
@@ -105,6 +105,7 @@ denied "alter broker configuration" "authoriz|denied" K kafka-configs $BS $ADM -
 denied "alter client quotas" "authoriz|denied" K kafka-configs $BS $ADM --alter --entity-type users --entity-name app --add-config producer_byte_rate=1
 denied "alter SCRAM credentials" "authoriz|denied" K kafka-configs $BS $ADM --alter --entity-type users --entity-name app --add-config 'SCRAM-SHA-512=[password=x]'
 denied "preferred leader election (needs cluster Alter)" "authoriz|denied|needs" K kafka-leader-election $BS --admin.config /it/admin1.properties --election-type preferred --all-topic-partitions
+denied "create a Strimzi-reserved topic" "authoriz|denied|not authorized" K kafka-topics $BS $ADM --create --topic strimzi.cruisecontrol.metrics --partitions 1 --replication-factor 1
 denied "create a reserved topic, although admin1 holds cluster Create" "authoriz|denied|not authorized" K kafka-topics $BS $ADM --create --topic __sneaky --partitions 1 --replication-factor 1
 denied "describe the consumer offsets topic (a denial looks like a missing topic)" "authoriz|denied|does not exist" K kafka-topics $BS $ADM --describe --topic __consumer_offsets
 denied "unregister a broker" "authoriz|denied|needs" K kafka-cluster unregister $BS --config /it/admin1.properties --id 1

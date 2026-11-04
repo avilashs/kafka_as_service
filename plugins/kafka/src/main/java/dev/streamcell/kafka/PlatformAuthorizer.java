@@ -38,6 +38,13 @@ public class PlatformAuthorizer extends StandardAuthorizer {
 
     /** Resource name prefix reserved for the platform (internal topics, canary, ...). */
     public static final String RESERVED_PREFIX = "__";
+    /** Strimzi's own topics, for example strimzi.cruisecontrol.metrics (no "__" prefix, found in the kind run). */
+    public static final String STRIMZI_PREFIX = "strimzi.";
+
+    /** True for names tenants may neither use nor grant access to. */
+    public static boolean reserved(String name) {
+        return name.startsWith(RESERVED_PREFIX) || name.startsWith(STRIMZI_PREFIX);
+    }
 
     /** What the platform accepts as a user name (the same rule the API applies). */
     private static final java.util.regex.Pattern TENANT_NAME = java.util.regex.Pattern.compile("^[a-z][a-z0-9-]{0,30}[a-z0-9]$");
@@ -124,7 +131,7 @@ public class PlatformAuthorizer extends StandardAuthorizer {
             case TOPIC:
             case GROUP:
             case TRANSACTIONAL_ID:
-                return r.name().startsWith(RESERVED_PREFIX);
+                return reserved(r.name());
             default:
                 return false;
         }
@@ -168,8 +175,8 @@ public class PlatformAuthorizer extends StandardAuthorizer {
             default:
                 return "ACLs on " + r.resourceType() + " resources are managed by the platform";
         }
-        if (r.name().startsWith(RESERVED_PREFIX)) {
-            return "resource names starting with \"" + RESERVED_PREFIX + "\" are reserved for the platform";
+        if (reserved(r.name())) {
+            return "resource names starting with \"" + RESERVED_PREFIX + "\" or \"" + STRIMZI_PREFIX + "\" are reserved for the platform";
         }
         if (r.patternType() == PatternType.PREFIXED && r.name().isEmpty()) {
             return "an empty prefix would match every resource";

@@ -19,7 +19,7 @@ public class PlatformAlterConfigPolicy implements AlterConfigPolicy {
     public void validate(RequestMetadata r) throws PolicyViolationException {
         if (r.resource().type() != ConfigResource.Type.TOPIC) return;
         String topic = r.resource().name();
-        if (topic != null && topic.startsWith(PlatformAuthorizer.RESERVED_PREFIX)) return;
+        if (topic != null && PlatformAuthorizer.reserved(topic)) return;
         TopicConfigRules.validate(r.configs(), 0);
     }
 
