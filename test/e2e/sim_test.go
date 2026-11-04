@@ -48,6 +48,7 @@ func (s *opSim) run(ctx context.Context) {
 			return
 		case <-t.C:
 			s.reconcileKafkas(ctx)
+			s.confirmPodTermination(ctx)
 			s.finalizeNamespaces(ctx)
 		}
 	}
@@ -99,6 +100,20 @@ func (s *opSim) reconcileKafkas(ctx context.Context) {
 	}
 }
 
+func (s *opSim) confirmPodTermination(ctx context.Context) {
+	pods, err := s.kube.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	zero := int64(0)
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.DeletionTimestamp != nil {
+			_ = s.kube.CoreV1().Pods(p.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &zero})
+		}
+	}
+}
+
 func (s *opSim) finalizeNamespaces(ctx context.Context) {
 	nss, err := s.kube.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: "streamcell.dev/inventory"})
 	if err != nil {
@@ -119,6 +134,9 @@ func (s *opSim) finalizeNamespaces(ctx context.Context) {
 			}
 		}
 		if np, err := s.kube.NetworkingV1().NetworkPolicies(ns.Name).List(ctx, metav1.ListOptions{}); err != nil || len(np.Items) > 0 {
+			empty = false
+		}
+		if pods, err := s.kube.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{}); err != nil || len(pods.Items) > 0 {
 			empty = false
 		}
 		if !empty {

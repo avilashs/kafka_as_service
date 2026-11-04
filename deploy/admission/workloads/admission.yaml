@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: streamcell-admission
+  namespace: streamcell-system
+spec:
+  selector: { app: streamcell-admission }
+  ports:
+    - { name: https, port: 443, targetPort: 8443 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamcell-admission
+  namespace: streamcell-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: streamcell-admission }
+  template:
+    metadata:
+      labels: { app: streamcell-admission }
+    spec:
+      serviceAccountName: streamcell-admission
+      nodeSelector: { streamcell.dev/pool: control }
+      tolerations:
+        - { key: streamcell.dev/control, operator: Exists, effect: NoSchedule }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector: { matchLabels: { app: streamcell-admission } }
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: guard
+          image: streamcell/cell-tools:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/streamcell-admission", "serve", "--addr", ":8443", "--tls-dir", "/tls"]
+          ports: [{ name: https, containerPort: 8443 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+      volumes:
+        - name: tls
+          secret: { secretName: streamcell-admission-tls }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: streamcell-admission
+  namespace: streamcell-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: streamcell-admission }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: streamcell-admission-certgen
+  namespace: streamcell-system
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      serviceAccountName: streamcell-admission
+      restartPolicy: OnFailure
+      nodeSelector: { streamcell.dev/pool: control }
+      tolerations:
+        - { key: streamcell.dev/control, operator: Exists, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: certgen
+          image: streamcell/cell-tools:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/streamcell-admission", "certgen", "--namespace", "streamcell-system", "--service", "streamcell-admission",
+                    "--secret", "streamcell-admission-tls", "--webhook", "streamcell-binding-guard"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

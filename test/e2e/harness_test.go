@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/avilashs/kafka_as_service/internal/agent"
+	kindprov "github.com/avilashs/kafka_as_service/internal/cloud/kind"
 	"github.com/avilashs/kafka_as_service/internal/engines/kafka"
 	"github.com/avilashs/kafka_as_service/internal/platform/api"
 	"github.com/avilashs/kafka_as_service/internal/platform/cellapi"
@@ -60,6 +61,7 @@ var (
 	kube       kubernetes.Interface
 	dyn        dynamic.Interface
 	workerBin  string
+	auditBin   string
 	st         *store.Store
 	sim        *opSim
 	logger     = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -137,6 +139,14 @@ func run(m *testing.M) int {
 		return 1
 	}
 
+	auditBin = filepath.Join(tmp, "streamcell-audit")
+	buildAudit := exec.Command("go", "build", "-o", auditBin, "./cmd/streamcell-audit")
+	buildAudit.Dir = repoRoot
+	if out, err := buildAudit.CombinedOutput(); err != nil {
+		fmt.Println("e2e: build audit:", err, string(out))
+		return 1
+	}
+
 	simCtx, cancelSim := context.WithCancel(ctx)
 	defer cancelSim()
 	sim = &opSim{dyn: dyn, kube: kube}
@@ -192,6 +202,8 @@ func newEnv(t *testing.T) *env {
 		Pools: []store.PoolSpec{
 			{ID: e.cellID + "-control", Kind: "control", InstanceType: "kind", MaxNodes: 3, Zones: zc(64000, 262144, 1)},
 			{ID: e.cellID + "-shared", Kind: "shared", InstanceType: "kind", MaxNodes: 3, Zones: zc(64000, 262144, 1)},
+			// Dedicated budget: one whole node per zone of instance type "kind", each 4 CPU / 8 GiB.
+			{ID: e.cellID + "-dedicated", Kind: "dedicated", InstanceType: "kind", MaxNodes: 3, NodeCPUMilli: 4000, NodeMemoryMiB: 8192, Zones: zc(0, 0, 1)},
 		},
 	})
 	if err != nil {
@@ -235,6 +247,7 @@ func (e *env) startAgent(cellTok, stateNS string) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
+	ag.Pools = &kindprov.Provider{Kube: kube, SpareSelector: "test-cell=" + e.cellID}
 	ctx, cancel := context.WithCancel(context.Background())
 	e.agent, e.stopAgnt = ag, cancel
 	go func() { _ = ag.Run(ctx) }()

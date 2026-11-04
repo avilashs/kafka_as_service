@@ -4,25 +4,123 @@
   "cloud": "kind",
   "state": "ACTIVE",
   "operatorShards": 1,
-  "limits": { "maxClusters": 10 },
+  "limits": {
+    "maxClusters": 10
+  },
   "env": {
     "domain": "streams.example.net",
-    "zones": ["zone-a", "zone-b", "zone-c"],
+    "zones": [
+      "zone-a",
+      "zone-b",
+      "zone-c"
+    ],
     "storageClass": "standard",
     "gatewayName": "streamcell-gateway",
     "gatewayNamespace": "streamcell-gateway",
-    "apiServerCIDRs": ["10.96.0.1/32", "__APISERVER_IP__/32"]
+    "apiServerCIDRs": [
+      "10.96.0.1/32",
+      "__APISERVER_IP__/32"
+    ],
+    "dedicatedSurge": 0
   },
   "pools": [
-    { "id": "kind-1-control", "kind": "control", "instanceType": "kind", "maxNodes": 3,
+    {
+      "id": "kind-1-control",
+      "kind": "control",
+      "instanceType": "kind",
+      "maxNodes": 3,
       "zones": [
-        { "zone": "zone-a", "cpuMilli": 3000, "memoryMiB": 8192, "ebsMBps": 100000, "attach": 64, "nodes": 1 },
-        { "zone": "zone-b", "cpuMilli": 3000, "memoryMiB": 8192, "ebsMBps": 100000, "attach": 64, "nodes": 1 },
-        { "zone": "zone-c", "cpuMilli": 3000, "memoryMiB": 8192, "ebsMBps": 100000, "attach": 64, "nodes": 1 } ] },
-    { "id": "kind-1-shared", "kind": "shared", "instanceType": "kind", "maxNodes": 3,
+        {
+          "zone": "zone-a",
+          "cpuMilli": 3000,
+          "memoryMiB": 8192,
+          "ebsMBps": 100000,
+          "attach": 64,
+          "nodes": 1
+        },
+        {
+          "zone": "zone-b",
+          "cpuMilli": 3000,
+          "memoryMiB": 8192,
+          "ebsMBps": 100000,
+          "attach": 64,
+          "nodes": 1
+        },
+        {
+          "zone": "zone-c",
+          "cpuMilli": 3000,
+          "memoryMiB": 8192,
+          "ebsMBps": 100000,
+          "attach": 64,
+          "nodes": 1
+        }
+      ]
+    },
+    {
+      "id": "kind-1-shared",
+      "kind": "shared",
+      "instanceType": "kind",
+      "maxNodes": 3,
       "zones": [
-        { "zone": "zone-a", "cpuMilli": 3000, "memoryMiB": 8192, "ebsMBps": 100000, "attach": 64, "nodes": 1 },
-        { "zone": "zone-b", "cpuMilli": 3000, "memoryMiB": 8192, "ebsMBps": 100000, "attach": 64, "nodes": 1 },
-        { "zone": "zone-c", "cpuMilli": 3000, "memoryMiB": 8192, "ebsMBps": 100000, "attach": 64, "nodes": 1 } ] }
+        {
+          "zone": "zone-a",
+          "cpuMilli": 3000,
+          "memoryMiB": 8192,
+          "ebsMBps": 100000,
+          "attach": 64,
+          "nodes": 1
+        },
+        {
+          "zone": "zone-b",
+          "cpuMilli": 3000,
+          "memoryMiB": 8192,
+          "ebsMBps": 100000,
+          "attach": 64,
+          "nodes": 1
+        },
+        {
+          "zone": "zone-c",
+          "cpuMilli": 3000,
+          "memoryMiB": 8192,
+          "ebsMBps": 100000,
+          "attach": 64,
+          "nodes": 1
+        }
+      ]
+    },
+    {
+      "id": "kind-1-dedicated",
+      "kind": "dedicated",
+      "instanceType": "kind",
+      "maxNodes": 3,
+      "nodeCpuMilli": 3000,
+      "nodeMemoryMiB": 4096,
+      "zones": [
+        {
+          "zone": "zone-a",
+          "cpuMilli": 0,
+          "memoryMiB": 0,
+          "ebsMBps": 0,
+          "attach": 0,
+          "nodes": 1
+        },
+        {
+          "zone": "zone-b",
+          "cpuMilli": 0,
+          "memoryMiB": 0,
+          "ebsMBps": 0,
+          "attach": 0,
+          "nodes": 1
+        },
+        {
+          "zone": "zone-c",
+          "cpuMilli": 0,
+          "memoryMiB": 0,
+          "ebsMBps": 0,
+          "attach": 0,
+          "nodes": 1
+        }
+      ]
+    }
   ]
 }

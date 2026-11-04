@@ -2,6 +2,7 @@
 # Brings up a local cell on kind plus a local control plane:
 #   kind cluster (node pools as labels/taints) + Strimzi 1.3.0 (cluster-wide, shard 0)
 #   + Envoy Gateway; Postgres + Temporal dev server; streamcell-api, -worker, -agent.
+# Also installs the placement enforcement (admission policies, pods/binding guard, auditor).
 # Requires: docker, kind, kubectl, helm, go. Logs and pids go to .cache/kind/.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -45,6 +46,20 @@ kubectl -n "$OPNS" patch deploy strimzi-cluster-operator --type merge -p \
 kubectl -n "$OPNS" rollout status deploy/strimzi-cluster-operator --timeout 5m
 kubectl create namespace streamcell-system --dry-run=client -o yaml | kubectl apply -f -
 
+# --- placement enforcement (design §10.2 rules 5 and 6) ---
+# The agent runs on the host with the kind admin kubeconfig, so that identity is the "provisioner"
+# allowed to change node pool labels and taints. In a real cell it is the agent's ServiceAccount.
+for f in "$ROOT"/deploy/admission/policies/*.yaml; do
+  sed 's#^  provisioners: ".*"#  provisioners: "kubernetes-admin"#' "$f" | kubectl apply -f -
+done
+(cd "$ROOT" && make images)
+kind load docker-image streamcell/cell-tools:dev --name streamcell
+kubectl apply -f "$ROOT/deploy/admission/workloads/rbac.yaml" -f "$ROOT/deploy/admission/workloads/webhook-config.yaml" \
+  -f "$ROOT/deploy/admission/workloads/admission.yaml" -f "$ROOT/deploy/admission/workloads/auditor.yaml"
+kubectl -n streamcell-system wait --for=condition=complete job/streamcell-admission-certgen --timeout=3m
+kubectl -n streamcell-system rollout status deploy/streamcell-admission --timeout=3m
+kubectl -n streamcell-system rollout status deploy/placement-auditor --timeout=3m
+
 # --- control-plane dependencies ---
 eval "$("$ROOT/hack/e2e-deps.sh" up)"
 DB_URL="${STREAMCELL_E2E_DATABASE_URL}"
@@ -70,7 +85,7 @@ start() { # name, then command with env
 start api DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" \
   STREAMCELL_DEV_TOKENS="$TENANT_TOKEN:dev-tenant" LISTEN=127.0.0.1:8080 CELL_LISTEN=127.0.0.1:8081 "$ROOT/bin/streamcell-api"
 start worker DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" "$ROOT/bin/streamcell-worker"
-start agent CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="$CELL_TOKEN" STATE_NAMESPACE=streamcell-system \
+start agent CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="$CELL_TOKEN" STATE_NAMESPACE=streamcell-system NODEPOOL_PROVIDER=kind \
   KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" STATUS_EVERY=5s "$ROOT/bin/streamcell-agent"
 for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
 echo "Local cell is up. API: http://127.0.0.1:8080 (Authorization: Bearer $TENANT_TOKEN). Logs: $STATE"

@@ -86,3 +86,104 @@ func TestConcurrentReservationsDoNotOversubscribe(t *testing.T) {
 		}
 	}
 }
+
+// The same guarantee for the dedicated tier, where capacity is whole nodes per zone.
+func TestConcurrentDedicatedReservationsDoNotOversubscribe(t *testing.T) {
+	ctx := context.Background()
+	const clustersThatFit, attempts = 2, 30
+	cellID, tenant := "cell-"+randHex(3), "tenant-"+randHex(3)
+	zones := []string{"z1", "z2", "z3"}
+	zc := func(nodes int) (out []store.ZoneCapacity) {
+		for _, z := range zones {
+			out = append(out, store.ZoneCapacity{Zone: z, CPUMilli: 1 << 30, MemoryMiB: 1 << 30, EBSMBps: 1 << 30, Attach: 1 << 20, Nodes: nodes})
+		}
+		return
+	}
+	// 2 nodes per zone: room for exactly 2 three-broker dedicated clusters (one broker per zone each).
+	if err := st.UpsertCell(ctx, store.CellSpec{ID: cellID, Region: "r", Cloud: "kind", AgentToken: randHex(8),
+		Env: engine.CellEnv{Domain: "d", Zones: zones},
+		Pools: []store.PoolSpec{
+			{ID: cellID + "-control", Kind: "control", InstanceType: "x", MaxNodes: 3, Zones: zc(3)},
+			{ID: cellID + "-ded", Kind: "dedicated", InstanceType: "kind", MaxNodes: 6, NodeCPUMilli: 4000, NodeMemoryMiB: 8192, Zones: zc(clustersThatFit)},
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTenant(ctx, tenant, tenant, &cellID); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(kafka.Spec{KafkaVersion: "4.3.1", BrokerType: "dev.ded", BrokerCount: 3, Storage: kafka.StorageSpec{SizeGiB: 1}})
+	req, err := kafka.New().PlanPlacement(engine.ResourceSpec{Tier: engine.TierDedicated, Spec: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the broker group matters for this pool; drop the control-pool groups.
+	req.Groups = req.Groups[len(req.Groups)-1:]
+	alloc := &capacity.Allocator{Store: st}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, exhausted, other := 0, 0, []error{}
+	for i := 0; i < attempts; i++ {
+		clusterID, opID := ids.Cluster(), ids.Operation()
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO clusters (id, tenant_id, name, engine, tier, state, spec) VALUES ($1,$2,$3,'kafka','dedicated','CREATING',$4)`,
+			clusterID, tenant, clusterID, raw); err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := alloc.Reserve(ctx, opID, clusterID, tenant, req)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, capacity.ErrExhausted):
+				exhausted++
+			default:
+				other = append(other, err)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(other) > 0 {
+		t.Fatalf("unexpected errors: %v", other)
+	}
+	if ok != clustersThatFit || exhausted != attempts-clustersThatFit {
+		t.Fatalf("%d ok, %d exhausted; want %d ok, %d exhausted", ok, exhausted, clustersThatFit, attempts-clustersThatFit)
+	}
+	for _, z := range zones {
+		used := countRows(t, `SELECT COALESCE(sum(i.nodes),0)::int FROM reservation_items i JOIN reservations r ON r.id=i.reservation_id
+			JOIN node_pools p ON p.id=i.pool_id WHERE p.cell_id=$1 AND p.kind='dedicated' AND i.zone=$2 AND r.status<>'RELEASED'`, cellID, z)
+		if used > clustersThatFit {
+			t.Errorf("zone %s: %d nodes reserved, budget is %d", z, used, clustersThatFit)
+		}
+	}
+}
+
+// A pod that does not fit one node of the pool's shape is refused up front, not left Pending.
+func TestDedicatedReservationRefusesPodsLargerThanTheNode(t *testing.T) {
+	ctx := context.Background()
+	cellID, tenant := "cell-"+randHex(3), "tenant-"+randHex(3)
+	zones := []string{"z1", "z2", "z3"}
+	var zcs []store.ZoneCapacity
+	for _, z := range zones {
+		zcs = append(zcs, store.ZoneCapacity{Zone: z, Nodes: 5})
+	}
+	if err := st.UpsertCell(ctx, store.CellSpec{ID: cellID, Region: "r", Cloud: "kind", AgentToken: randHex(8), Env: engine.CellEnv{Domain: "d"},
+		Pools: []store.PoolSpec{{ID: cellID + "-ded", Kind: "dedicated", InstanceType: "kind", MaxNodes: 15, NodeCPUMilli: 400, NodeMemoryMiB: 8192, Zones: zcs}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTenant(ctx, tenant, tenant, &cellID); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(kafka.Spec{KafkaVersion: "4.3.1", BrokerType: "dev.ded", BrokerCount: 3, Storage: kafka.StorageSpec{SizeGiB: 1}})
+	req, _ := kafka.New().PlanPlacement(engine.ResourceSpec{Tier: engine.TierDedicated, Spec: raw})
+	req.Groups = req.Groups[len(req.Groups)-1:] // dev.ded brokers need 500m; the node has 400m
+	clusterID, opID := ids.Cluster(), ids.Operation()
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO clusters (id, tenant_id, name, engine, tier, state, spec) VALUES ($1,$2,$3,'kafka','dedicated','CREATING',$4)`, clusterID, tenant, clusterID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&capacity.Allocator{Store: st}).Reserve(ctx, opID, clusterID, tenant, req); !errors.Is(err, capacity.ErrExhausted) {
+		t.Fatalf("want ErrExhausted for a pod larger than the node, got %v", err)
+	}
+}

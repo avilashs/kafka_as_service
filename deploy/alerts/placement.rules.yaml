@@ -1,0 +1,49 @@
+# Prometheus alerting rules for placement (design §10.2 rule 6). Load with `rule_files:`.
+# Every alert must carry a runbook_url that resolves to a file in docs/runbooks/;
+# internal/placement/alerts_test.go enforces that in CI.
+groups:
+  - name: streamcell-placement
+    rules:
+      - alert: StreamcellPlacementViolation
+        expr: sum by (rule, cluster, node) (streamcell_placement_violations) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Placement rule {{ $labels.rule }} is broken for {{ $labels.cluster }} on {{ $labels.node }}"
+          description: >-
+            The placement auditor found pods or nodes that break a placement invariant. Run
+            `streamcell-audit` for the pods involved.
+          runbook_url: "docs/runbooks/placement-violation.md"
+
+      - alert: StreamcellDedicatedNodeLeak
+        expr: sum by (cluster) (streamcell_placement_violations{rule="dedicated_node_count_mismatch"}) > 0
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.cluster }} holds more dedicated nodes than it has pods (plus surge)"
+          description: >-
+            A dedicated pool has nodes that no pod uses. Either a delete or scale-in did not release
+            them, or a rotation surge did not finish. They are billed until released.
+          runbook_url: "docs/runbooks/dedicated-node-leak.md"
+
+      - alert: StreamcellPlacementAuditStale
+        expr: time() - streamcell_placement_audit_last_success_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "The placement auditor has not completed an audit for over 5 minutes"
+          description: >-
+            Violations would go undetected. The auditor is down, cannot read the cluster, or is stuck.
+          runbook_url: "docs/runbooks/placement-audit-stale.md"
+
+      - alert: StreamcellPlacementAuditorMissing
+        expr: absent(streamcell_placement_audit_last_success_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "No placement auditor is reporting metrics in this cell"
+          runbook_url: "docs/runbooks/placement-audit-stale.md"

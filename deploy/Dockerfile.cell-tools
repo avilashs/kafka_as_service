@@ -1,0 +1,7 @@
+# Cell tools image: the pods/binding guard (streamcell-admission) and the placement auditor
+# (streamcell-audit). Binaries are built outside (static, CGO off) by `make images`, so this
+# image needs no base image pulls: it is just the two executables.
+FROM scratch
+COPY bin/linux/streamcell-admission /streamcell-admission
+COPY bin/linux/streamcell-audit /streamcell-audit
+USER 65532:65532

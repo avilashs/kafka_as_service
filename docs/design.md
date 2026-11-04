@@ -58,7 +58,7 @@ I checked upstream state on 2026-11-04. Only `github.com` and `raw.githubusercon
 | Strimzi `tlsroute` listener | Added in 1.1.0. Generates Gateway API `v1` `TLSRoute`s per broker and for bootstrap. The `ingress` listener type is deprecated. | Shared tier uses `type: tlsroute` instead of hand-built routes on `cluster-ip` services ([ADR-0005](adr/0005-shared-tier-networking.md)). |
 | Kafka | 4.4.0 is tagged; 4.3.2 is current on the 4.3 line. Strimzi 1.3 supports 4.2.2 and 4.3.x. Kafka 4.4 needs Strimzi 1.4 (unreleased). ZooKeeper was removed in 4.0. | Launch with 4.3.x, then add 4.4 when Strimzi 1.4 ships. KRaft only. |
 | KIP-1066 broker cordoning | Strimzi 1.2 uses it during auto-rebalance on scale-down for Kafka 4.3+. | Scale-in cordons brokers first, so no new replicas land on brokers being drained. |
-| Strimzi SA tokens | 1.2 stopped auto-mounting SA tokens and mounts them through a volume instead. The default security context matches the Restricted PSS. | Helps the "no SA token in brokers" goal. Rack awareness still needs node read access in the init container (spike S-4). |
+| Strimzi SA tokens | 1.2 sets `automountServiceAccountToken: false` on the pod spec but mounts a projected token volume instead, into both the rack init container and the broker container (checked in the 1.3.0 source in M2). The default security context matches the Restricted PSS. | A token reaches the brokers; it is limited to `get nodes`. See §10.2 and spike S-4. |
 | ingress-nginx | Retired in March 2026 with no further releases. | Not used. Already the brief's position. |
 | Bitnami | Free versioned images moved to the unpatched `bitnamilegacy` repo around Aug–Sep 2025. | No Bitnami charts or images. This includes the Postgres and Temporal sub-charts: use CloudNativePG, the official Postgres images, and Temporal with external persistence. |
 | Gateway API | v1.5 promoted `TLSRoute` to Standard `v1`; v1.7.0 is the latest tag. Envoy Gateway v1.9.3 vendors gateway-api v1.6.1 and uses `gwapiv1.TLSRoute`. | Envoy Gateway ≥ 1.9 for `TLSRoute v1`. **Re-verify** against the Envoy Gateway compatibility matrix. |
@@ -520,22 +520,31 @@ Reserve(cell, demand):                          -- one transaction, READ COMMITT
   - partitions (a per-cluster limit derived from size, and a per-cell total).
 - The control plane does not pick individual nodes; the scheduler does. The control plane guarantees feasibility, and admission plus the auditor guarantee the invariants.
 
-### 10.2 Enforcement layers (M2 has a test for each)
+### 10.2 Enforcement layers (as built in M2; each row has a test, see `docs/milestones/m2.md`)
 
-| # | Invariant | Configured by | Enforced at admission by | Audited as |
+Placement is expressed with engine-neutral labels (`internal/platform/labels`) that every engine puts on the pods it renders: `streamcell.dev/cluster`, `role`, `required-pool` (`shared` | `dedicated` | `control`) and `exclusive` (`per-resource` | `whole-node`). The policy, the guard and the auditor know nothing about Kafka. The rule logic itself lives once, in `internal/placement`, and is shared by the guard and the auditor.
+
+| # | Invariant | Rendered by the engine | Refused at admission by | Detected by the audit as |
 |---|---|---|---|---|
-| 1 | No two brokers of one cluster on a node (both tiers) | Required anti-affinity on hostname | VAP: broker pods must carry the term. Binding webhook: rejects a bind if the node already has a broker with the same `streamcell.dev/cluster` | `same_cluster_brokers_on_node` |
-| 2 | Zone spread, rack set | `topologySpreadConstraints` maxSkew 1 + Strimzi rack awareness | VAP: term present | `zone_skew > 1`, `broker_rack_mismatch` (probe compares `broker.rack` with the node's zone) |
-| 3a | Dedicated: own pool, own taint | Karpenter `NodePool` per cluster, label `dedicated-owner=<id>`, taint `streamcell.dev/dedicated=<id>:NoSchedule` | VAP on Pods: a toleration for `streamcell.dev/dedicated` is allowed only with value = the pod's own cluster label, and only on broker pods. VAP on Nodes: only the provisioner SA may change these labels or taints | `dedicated_node_foreign_pod` (any non-DaemonSet pod not owned by the cluster) |
-| 3b | Dedicated: one broker per node, vs all brokers | Anti-affinity `namespaceSelector: {}` on `role=kafka-broker` | VAP: dedicated brokers must carry that exact term. Webhook: reject a bind onto a node with any broker | `dedicated_node_multi_broker` |
-| 3c | Node count = brokers (+ surge) | `NodePool.spec.limits.nodes = brokers + surge` | — | `dedicated_node_count_mismatch` (allows +surge during rotation, max 2 h) |
-| 4 | Shared pods stay in the shared pool | Shared nodeAffinity `pool=shared`; dedicated taints | VAP: tenant-namespace pods must select a pool consistent with `streamcell.dev/tier` | `shared_broker_off_pool` |
-| 5 | Admission (defence in depth) | `ValidatingAdmissionPolicy` (CEL, spec-level) + `pods/binding` webhook (state-level; CEL cannot look up other pods) | Webhook `failurePolicy: Fail`, scoped by `namespaceSelector` to tenant namespaces, 3 replicas on the control pool | `admission_bypass` (a violation found by the audit that admission should have rejected) |
-| 6 | Continuous audit | `placement-auditor` Deployment + `streamcell-audit` CLI (same Go package) | — | `streamcell_placement_violations{rule,cluster,node}` gauge; alert at `> 0` for 1 m, linked to a runbook |
+| 1 | No two brokers of one cluster on a node (both tiers) | Required pod anti-affinity on `kubernetes.io/hostname`, `namespaceSelector: {}`, selecting the cluster's own pods of that role | Policy `[anti-affinity]` (term must be present and exactly right). Guard: refuses a bind when the node already hosts a pod of the same cluster and role | `same_group_on_node` |
+| 2 | Zone spread | `topologySpreadConstraints` over the zone label, maxSkew 1, `DoNotSchedule` | Policy `[zone-spread]` | `zone_skew` (pods per candidate zone differ by more than 1). **`broker.rack` vs the node's zone is not audited yet:** it needs a Kafka connection (M3 probes) |
+| 3a | Dedicated: own pool, own taint | One node pool per cluster: nodes labelled `dedicated-owner=<id>`, tainted `streamcell.dev/dedicated=<id>:NoSchedule`; pods require the owner label and tolerate only that taint | Policy `[pool]`, `[tolerations]` (wildcard, other clusters' taints and `Exists` on the dedicated key are all refused). Node protection policy: only the provisioner may change pool labels and taints | `dedicated_node_foreign_pod` |
+| 3b | Dedicated: exactly one broker per node, against all brokers of all tenants | Anti-affinity selecting every pod of the role, in every namespace | Policy `[anti-affinity]`. Guard: refuses a bind onto a node that already has a whole-node pod | `dedicated_node_multi_exclusive` |
+| 3c | Node count = broker count (+ surge) | Capacity reserves exactly one node per broker; the provider claims exactly that many (Karpenter: `limits.nodes = brokers + surge`) | n/a | `dedicated_node_count_mismatch` (a resource holds more nodes than pods + surge). The "max 2 h surge" timer is not implemented; the alert waits 30 minutes instead |
+| 4 | Shared pods stay in the shared pool; control pods in the control pool | Pool node affinity; dedicated and control taints | Policy `[pool]`, `[tolerations]`. Guard: refuses binds to a node of the wrong pool | `pod_off_pool` |
+| 5 | Admission as defence in depth | `ValidatingAdmissionPolicy` (CEL, sees the pod) + `pods/binding` guard (sees the node), scoped to tenant namespaces, `failurePolicy: Fail`, 2+ replicas with a PDB | (this row) | (see 6) |
+| 6 | Continuous audit | `placement-auditor` Deployment and the `streamcell-audit` CLI, same code | n/a | `streamcell_placement_violations{rule,cluster,node}`; alerts with runbooks, plus an alert if the auditor itself goes silent |
 
-Controllers get the same per-cluster hostname anti-affinity and zone spread on the control pool (`streamcell.dev/pool=control`, taint `streamcell.dev/control:NoSchedule`). The admission policy also enforces the security rules: `automountServiceAccountToken: false` on broker containers, `runAsNonRoot`, `seccompProfile: RuntimeDefault`, no `hostPath`, no `hostNetwork`, and no privilege escalation.
+The admission policy additionally refuses: pods without placement labels, a `cluster` label that differs from the namespace, `spec.nodeName` set at creation (it would bypass the scheduler and the guard), changes to placement labels after creation, `hostNetwork`/`hostPID`/`hostIPC`, `hostPath` volumes, privileged containers and `hostPort`.
 
-Admission tests (M2): a test suite submits deliberately bad pods (missing anti-affinity, a foreign dedicated toleration, a shared broker selecting a dedicated pool, and so on) and asserts each rejection by message. It also binds a valid pod spec onto an occupied dedicated node through the binding API directly, to prove the webhook rejects it.
+Controllers get the same per-cluster hostname anti-affinity and zone spread on the control pool (taint `streamcell.dev/control:NoSchedule`).
+
+**Security-context rules are not in the policy yet.** The earlier draft listed `automountServiceAccountToken: false`, `runAsNonRoot` and `seccompProfile` as policy rules. Spike S-4 (below) showed Strimzi 1.3 mounts a service-account token into the broker container, so that rule cannot hold for Strimzi pods. The kind smoke test now prints the real security context of a broker pod; `runAsNonRoot`/seccomp/`readOnlyRootFilesystem` rules are added in M3 once that evidence is reviewed.
+
+**Known weaknesses of the guard** (also in `docs/milestones/m2.md`):
+- Decisions are serialised per node *within one replica*. With 2+ replicas two simultaneous binds to the same node could both be admitted. The scheduler binds one pod at a time and enforces the same anti-affinity, so this needs a scheduler bug *and* a race; the auditor catches it.
+- Its serving certificate is valid for 10 years and is not rotated. An expired certificate with `failurePolicy: Fail` stops all binds in tenant namespaces. cert-manager integration and an expiry alert are M6 items.
+- Node labels set when a node *registers* itself (Karpenter-launched nodes) are trusted; the node protection policy covers only later changes.
 
 ---
 
@@ -684,7 +693,7 @@ Conclusion: above about 1 MB/s, the **per-GB** charge dominates, and it is the s
 - **Isolation:**
   - Default-deny `NetworkPolicy` in every tenant namespace, in both directions. Allowed: intra-cluster replication and controller traffic; the gateway namespace to the external listener; the canary, agent probe, Prometheus and Cruise Control to specific ports; DNS.
   - A Cilium cluster-wide policy denies `169.254.169.254/32`, `fd00:ec2::254`, and the EKS Pod Identity endpoint from tenant namespaces. IMDSv2 hop limit is 1 on nodes.
-  - Brokers have no SA token (Strimzi 1.2+ default; the init container's token is checked in spike S-4). `runAsNonRoot`, `seccomp: RuntimeDefault`, all capabilities dropped, and `readOnlyRootFilesystem` where Strimzi allows it (spike S-4).
+  - Brokers carry a service-account token that can only `get nodes` (spike S-4: Strimzi mounts it into the broker container for rack awareness and it cannot be removed without forking). Mitigation: the ClusterRole grants nothing else; a compromised broker can read node names, labels and addresses. `runAsNonRoot`, `seccomp: RuntimeDefault`, all capabilities dropped, and `readOnlyRootFilesystem` where Strimzi allows it (spike S-4).
 - **Encryption at rest:** EBS encrypted with a KMS key per cell. Optionally, dedicated clusters can use a customer-managed key through a per-cluster StorageClass (`kmsKeyId`). NVMe instance-store encryption is hardware-level on Nitro (**re-verify** for the chosen instance families).
 - **Audit:** every control-plane mutation is written to `audit_log` in the same transaction as the change. EKS audit logs are kept per cell.
 - **Supply chain:** images are signed with cosign and come with SBOMs. A cell-level admission policy admits only signed images from the provider registry.
@@ -699,7 +708,7 @@ Conclusion: above about 1 MB/s, the **per-GB** charge dominates, and it is the s
 | Tampering | A control-plane bug or database restore issues mass deletes | Absence ≠ delete, monotonic revision check, mass-change brake ([§7.2](#72-agent-protocol-pull-only)) | — |
 | Repudiation | A disputed delete | Append-only audit log with the request digest and actor | — |
 | Info disclosure | A cross-tenant network path | Default-deny NetworkPolicy, separate namespaces, block on cloud metadata | — |
-| Info disclosure | A broker RCE escapes the container onto a shared node | Non-root, seccomp, no SA token, no host mounts, cluster-wide kernel patching cadence | **A kernel escape on a shared node exposes co-located tenants.** The dedicated tier removes this. A gVisor or Kata evaluation is listed as a v2 item. |
+| Info disclosure | A broker RCE escapes the container onto a shared node | Non-root and seccomp (to be verified, see S-4), a token that can only `get nodes`, no host mounts, cluster-wide kernel patching cadence | **A kernel escape on a shared node exposes co-located tenants.** The dedicated tier removes this. A gVisor or Kata evaluation is listed as a v2 item. |
 | Info disclosure | Metrics or logs leak across tenants | Label enforcement on queries, log delivery per namespace | — |
 | DoS | A noisy neighbour | [§12](#12-noisy-neighbour-controls-shared-tier) controls. The SLO is set from M6 measurements | Bounded, not eliminated |
 | DoS | A partition storm or connection flood | `controller_mutation_rate`, partition limits, connection limits at Envoy and on brokers | — |
@@ -797,7 +806,7 @@ The Kafka sizes in kind are tiny (heap 256 MiB). This needs about 16 GiB of host
 | S-1 | Temporal versus a Postgres-native queue: confirm operator burden is acceptable, or fall back (ADR-0002) | M1 |
 | S-2 | Strimzi shard size: reconcile latency at 25/50/100 clusters per shard | M2 / M6 |
 | S-3 | Envoy Gateway ≥ 1.9 with Strimzi `tlsroute`: passthrough works, policy attachment for connection limits on `TLSRoute`, zonal routing | M3 |
-| S-4 | Strimzi 1.3 broker pod security: is the SA token mounted *only* into the rack init container? Is `readOnlyRootFilesystem` possible? If not: per-zone node pools with static rack config | M2 |
+| S-4 | **Done in M2 (from Strimzi 1.3.0 source).** The projected service-account token is mounted into the broker container *and* the rack init container, not only the init container; it is bound to the `get nodes` ClusterRole. It cannot be removed without forking. `readOnlyRootFilesystem` and `runAsNonRoot` are still to be confirmed from a real pod (the kind smoke prints them). | M2 |
 | S-5 | The EBS CSI ext4 format keeps 5 % reserved blocks; `tune2fs -m 0` releases them online | M4 |
 | S-6 | Online shared → dedicated migration without a bootstrap change | M4 |
 | S-7 | `PlatformAuthorizer` wrapping `StandardAuthorizer`: API-key-based denies; `CreateAcls` filtering; behaviour with the Strimzi User Operator's ACL management (does the UO remove ACLs it does not own?) | M3 |

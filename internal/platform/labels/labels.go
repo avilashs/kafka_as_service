@@ -45,6 +45,7 @@ const (
 	NodePoolID     = Prefix + "nodepool"        // ID of the NodePoolSpec that claimed the node
 	TaintDedicated = Prefix + "dedicated"       // value = owner resource ID, effect NoSchedule
 	TaintControl   = Prefix + "control"         // control pool taint
+	TaintSpare     = Prefix + "spare"           // keeps general workloads off unclaimed spare nodes (kind)
 	Zone           = "topology.kubernetes.io/zone"
 	Hostname       = "kubernetes.io/hostname"
 )

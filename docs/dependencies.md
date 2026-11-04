@@ -63,6 +63,7 @@ Status values:
 | `github.com/pressly/goose/v3` | MIT | Migrations (embedded) |
 | `github.com/getkin/kin-openapi` | MIT | OpenAPI validation in tests |
 | `github.com/google/uuid` | BSD-3-Clause | Operation and reservation IDs |
+| `sigs.k8s.io/yaml` | Apache-2.0 / BSD-3-Clause | Reads the alert rules in tests |
 | `go.temporal.io/api` | MIT | Temporal API types (error classification) |
 | `sigs.k8s.io/controller-runtime/pkg/envtest` | Apache-2.0 | Real kube-apiserver and etcd in e2e tests |
 | `sqlc`, `oapi-codegen`, `chi` | MIT / Apache-2.0 / MIT | Planned, **not used in M1**: queries and handlers are hand-written; the stdlib `net/http` router is used |

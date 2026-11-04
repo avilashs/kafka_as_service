@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 
+	"github.com/avilashs/kafka_as_service/internal/cloud"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
@@ -95,8 +96,14 @@ type clusterState struct {
 	// ReportedDeleted: the control plane has acknowledged a report with Deleted=true,
 	// so the agent may forget this cluster.
 	ReportedDeleted bool `json:"reportedDeleted"`
-	applyErr        string
-	bundle          *engine.Bundle
+	// NodePools are the dedicated pools this resource holds; they are released, after every
+	// object and pod is gone, when the resource is deleted.
+	NodePools []engine.NodePoolSpec `json:"nodePools,omitempty"`
+	// DeleteGrace, if > 0, is the termination grace used for the resource's pods on delete.
+	DeleteGrace int64 `json:"deleteGrace,omitempty"`
+	applyErr    string
+	poolErr     string
+	bundle      *engine.Bundle
 }
 
 // Agent is the cell agent.
@@ -107,6 +114,9 @@ type Agent struct {
 	Mapper meta.ResettableRESTMapper
 	Cfg    Config
 	Log    *slog.Logger
+	// Pools provisions dedicated node pools. Nil means the cell has none: bundles that
+	// ask for one then report an apply error instead of silently running unplaced.
+	Pools cloud.NodePoolProvider
 
 	applyMu  sync.Mutex // serialises apply/delete of bundles (poll loop vs resync)
 	mu       sync.Mutex // guards the fields below
@@ -282,16 +292,30 @@ func (a *Agent) handle(ctx context.Context, e store.DesiredEntry) {
 	}
 	if e.Tombstone {
 		refs := curRefs
-		if e.Bundle != nil && len(e.Bundle.Objects) > 0 {
-			refs = nil
-			for _, o := range e.Bundle.Objects {
-				refs = append(refs, refOf(o))
+		a.mu.Lock()
+		pools, grace := cs.NodePools, cs.DeleteGrace
+		a.mu.Unlock()
+		if e.Bundle != nil {
+			if len(e.Bundle.Objects) > 0 {
+				refs = nil
+				for _, o := range e.Bundle.Objects {
+					refs = append(refs, refOf(o))
+				}
+			}
+			if len(e.Bundle.NodePools) > 0 {
+				pools = e.Bundle.NodePools
+			}
+			if e.Bundle.DeleteGraceSeconds > 0 {
+				grace = e.Bundle.DeleteGraceSeconds
 			}
 		}
-		done, err := a.deleteRefs(ctx, refs)
 		a.mu.Lock()
-		cs.Generation, cs.Digest, cs.Tombstone, cs.Refs, cs.Deleted, cs.bundle = e.Generation, e.BundleDigest, true, refs, done, nil
-		cs.applyErr = errString(err)
+		cs.Generation, cs.Digest, cs.Tombstone, cs.Refs, cs.bundle = e.Generation, e.BundleDigest, true, refs, nil
+		cs.NodePools, cs.DeleteGrace, cs.Deleted = pools, grace, false
+		a.mu.Unlock()
+		done, err := a.driveDelete(ctx, refs, pools, grace)
+		a.mu.Lock()
+		cs.Deleted, cs.applyErr = done, errString(err)
 		a.mu.Unlock()
 		return
 	}
@@ -301,12 +325,15 @@ func (a *Agent) handle(ctx context.Context, e store.DesiredEntry) {
 		a.mu.Unlock()
 		return
 	}
+	// Dedicated nodes first, so they are labelled and tainted before any pod can be scheduled.
+	poolErr := a.ensurePools(ctx, e.Bundle.NodePools)
 	newRefs, err := a.apply(ctx, e.Bundle)
 	if err == nil {
 		err = a.prune(ctx, curRefs, newRefs)
 	}
 	a.mu.Lock()
 	cs.Generation, cs.Digest, cs.Tombstone, cs.Deleted, cs.bundle = e.Generation, e.BundleDigest, false, false, e.Bundle
+	cs.NodePools, cs.DeleteGrace, cs.poolErr = e.Bundle.NodePools, e.Bundle.DeleteGraceSeconds, errString(poolErr)
 	if err == nil {
 		cs.Refs = newRefs
 	} else {
@@ -321,11 +348,85 @@ func (a *Agent) handle(ctx context.Context, e store.DesiredEntry) {
 	}
 }
 
+// ensurePools asks the provider for the bundle's dedicated node pools.
+func (a *Agent) ensurePools(ctx context.Context, pools []engine.NodePoolSpec) error {
+	if len(pools) == 0 {
+		return nil
+	}
+	if a.Pools == nil {
+		return errors.New("bundle requests a dedicated node pool but this cell has no node pool provider")
+	}
+	var errs []error
+	for _, p := range pools {
+		if err := a.Pools.Ensure(ctx, p); err != nil {
+			errs = append(errs, fmt.Errorf("node pool %s: %w", p.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// driveDelete performs one pass of deleting a resource and reports whether it is finished:
+// objects deleted, pods terminated quickly (the data is being destroyed anyway), and only
+// then the dedicated nodes returned. Called on every status tick until it reports done.
+func (a *Agent) driveDelete(ctx context.Context, refs []ObjectRef, pools []engine.NodePoolSpec, graceSeconds int64) (bool, error) {
+	gone, err := a.deleteRefs(ctx, refs)
+	if graceSeconds > 0 {
+		a.terminatePods(ctx, refs, graceSeconds)
+	}
+	if err != nil || !gone {
+		return false, err
+	}
+	if len(pools) == 0 {
+		return true, nil
+	}
+	if a.Pools == nil {
+		return false, errors.New("resource holds a dedicated node pool but this cell has no node pool provider")
+	}
+	all := true
+	for _, p := range pools {
+		done, err := a.Pools.Release(ctx, p)
+		if err != nil {
+			return false, fmt.Errorf("release node pool %s: %w", p.ID, err)
+		}
+		all = all && done
+	}
+	return all, nil
+}
+
+// terminatePods shortens the grace period of every pod left in the resource's namespaces.
+func (a *Agent) terminatePods(ctx context.Context, refs []ObjectRef, graceSeconds int64) {
+	for _, r := range refs {
+		if r.Kind != "Namespace" || r.APIVersion != "v1" {
+			continue
+		}
+		pods, err := a.Kube.CoreV1().Pods(r.Name).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			continue // namespace already gone
+		}
+		for i := range pods.Items {
+			err := a.Kube.CoreV1().Pods(r.Name).Delete(ctx, pods.Items[i].Name, metav1.DeleteOptions{GracePeriodSeconds: &graceSeconds})
+			if err != nil && !apierrors.IsNotFound(err) {
+				a.Log.Warn("terminate pod", "pod", r.Name+"/"+pods.Items[i].Name, "err", err)
+			}
+		}
+	}
+}
+
 func errString(err error) string {
 	if err == nil {
 		return ""
 	}
 	return err.Error()
+}
+
+func joinErr(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + "; " + b
 }
 
 func unionRefs(a, b []ObjectRef) []ObjectRef {
@@ -488,18 +589,32 @@ func (a *Agent) reportStatus(ctx context.Context) {
 		obs := engine.Observed{Generation: s.cs.Generation, ApplyError: s.cs.applyErr}
 		if s.cs.Tombstone {
 			if !s.cs.Deleted {
-				done, err := a.deleteRefs(ctx, s.refs) // keep driving deletion
-				if err == nil && done {
-					a.mu.Lock()
-					if c := a.clusters[s.id]; c != nil && c.Generation == s.cs.Generation {
+				done, err := a.driveDelete(ctx, s.refs, s.cs.NodePools, s.cs.DeleteGrace) // keep driving deletion
+				a.mu.Lock()
+				if c := a.clusters[s.id]; c != nil && c.Generation == s.cs.Generation {
+					c.applyErr = errString(err)
+					if err == nil && done {
 						c.Deleted = true
 					}
-					a.mu.Unlock()
-					s.cs.Deleted = true
 				}
+				a.mu.Unlock()
+				s.cs.Deleted = err == nil && done
+				obs.ApplyError = errString(err)
 			}
 			obs.Deleted = s.cs.Deleted
 		} else {
+			if len(s.cs.NodePools) > 0 && s.cs.poolErr != "" { // retry pools that could not be provisioned yet
+				err := a.ensurePools(ctx, s.cs.NodePools)
+				a.mu.Lock()
+				if c := a.clusters[s.id]; c != nil && c.Generation == s.cs.Generation {
+					c.poolErr = errString(err)
+				}
+				a.mu.Unlock()
+				s.cs.poolErr = errString(err)
+			}
+			if s.cs.poolErr != "" {
+				obs.ApplyError = joinErr(obs.ApplyError, s.cs.poolErr)
+			}
 			for _, r := range s.refs {
 				obs.Objects = append(obs.Objects, a.observe(ctx, r))
 			}

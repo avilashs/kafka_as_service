@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt-check e2e-deps e2e kind-up kind-smoke kind-down
+.PHONY: build test vet fmt-check e2e-deps e2e images kind-up kind-smoke kind-down
 
 build:
 	go build -o bin/ ./cmd/...
@@ -11,6 +11,13 @@ vet:
 
 fmt-check:
 	@test -z "$$(gofmt -l cmd internal test)" || (gofmt -l cmd internal test; exit 1)
+
+# Static linux binaries + the cell-tools image (guard webhook and auditor).
+images:
+	mkdir -p bin/linux
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/linux/streamcell-admission ./cmd/streamcell-admission
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/linux/streamcell-audit ./cmd/streamcell-audit
+	docker build -f deploy/Dockerfile.cell-tools -t streamcell/cell-tools:dev .
 
 # Postgres (docker), Temporal dev server, envtest binaries.
 e2e-deps:

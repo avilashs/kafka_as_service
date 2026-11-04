@@ -13,6 +13,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/avilashs/kafka_as_service/internal/agent"
+	awsprov "github.com/avilashs/kafka_as_service/internal/cloud/aws"
+	kindprov "github.com/avilashs/kafka_as_service/internal/cloud/kind"
 )
 
 func main() {
@@ -37,6 +39,16 @@ func main() {
 	a, err := agent.New(rc, &agent.CPClient{BaseURL: os.Getenv("CONTROL_PLANE_URL"), Token: os.Getenv("CELL_TOKEN")}, cfg, log)
 	if err != nil {
 		log.Error("agent", "err", err)
+		os.Exit(1)
+	}
+	switch prov := os.Getenv("NODEPOOL_PROVIDER"); prov {
+	case "kind":
+		a.Pools = &kindprov.Provider{Kube: a.Kube, Log: log}
+	case "karpenter":
+		a.Pools = &awsprov.Karpenter{Dyn: a.Dyn, NodeClassName: os.Getenv("KARPENTER_NODECLASS")}
+	case "", "none":
+	default:
+		log.Error("unknown NODEPOOL_PROVIDER", "value", prov)
 		os.Exit(1)
 	}
 	if err := a.Run(ctx); err != nil {

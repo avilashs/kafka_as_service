@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: placement-auditor
+  namespace: streamcell-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: placement-auditor }
+  template:
+    metadata:
+      labels: { app: placement-auditor }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: placement-auditor
+      nodeSelector: { streamcell.dev/pool: control }
+      tolerations:
+        - { key: streamcell.dev/control, operator: Exists, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: auditor
+          image: streamcell/cell-tools:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/streamcell-audit", "--serve", ":9102", "--interval", "30s", "--surge", "1"]
+          ports: [{ name: metrics, containerPort: 9102 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 9102 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: placement-auditor
+  namespace: streamcell-system
+spec:
+  selector: { app: placement-auditor }
+  ports:
+    - { name: metrics, port: 9102, targetPort: 9102 }
