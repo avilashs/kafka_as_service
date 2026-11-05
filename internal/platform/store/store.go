@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -151,11 +152,15 @@ type OpError struct {
 const clusterCols = `id, tenant_id, name, engine, tier, cell_id, state, state_reason, spec, spec_generation,
 	assignment, lock_operation_id, created_at, updated_at, deleted_at`
 
-func scanCluster(row pgx.Row) (*Cluster, error) {
+func scanCluster(row pgx.Row) (*Cluster, error) { return scanClusterInto(row) }
+
+// scanClusterInto scans the cluster columns followed by any extra destinations (joined columns).
+func scanClusterInto(row pgx.Row, extra ...any) (*Cluster, error) {
 	var c Cluster
 	var assignment []byte
-	if err := row.Scan(&c.ID, &c.TenantID, &c.Name, &c.Engine, &c.Tier, &c.CellID, &c.State, &c.StateReason,
-		&c.Spec, &c.SpecGeneration, &assignment, &c.LockOperationID, &c.CreatedAt, &c.UpdatedAt, &c.DeletedAt); err != nil {
+	dest := append([]any{&c.ID, &c.TenantID, &c.Name, &c.Engine, &c.Tier, &c.CellID, &c.State, &c.StateReason,
+		&c.Spec, &c.SpecGeneration, &assignment, &c.LockOperationID, &c.CreatedAt, &c.UpdatedAt, &c.DeletedAt}, extra...)
+	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -169,6 +174,15 @@ func scanCluster(row pgx.Row) (*Cluster, error) {
 	}
 	return &c, nil
 }
+
+// clusterColsQualified is clusterCols with every column taken from the alias c (for joins).
+var clusterColsQualified = func() string {
+	parts := strings.Split(clusterCols, ",")
+	for i, p := range parts {
+		parts[i] = "c." + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
+}()
 
 const opCols = `id, tenant_id, cluster_id, type, state, step, error, created_at, updated_at, completed_at`
 

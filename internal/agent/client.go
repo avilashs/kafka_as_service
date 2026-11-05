@@ -83,3 +83,19 @@ func (c *CPClient) Metering(ctx context.Context, recs []metering.Record) (*cella
 	}
 	return &out, nil
 }
+
+// CanaryTargets lists the clusters of the cell the canary should probe.
+func (c *CPClient) CanaryTargets(ctx context.Context) ([]cellapi.CanaryTarget, error) {
+	var out struct {
+		Targets []cellapi.CanaryTarget `json:"targets"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/cell/v1/canary/targets", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Targets, nil
+}
+
+// CanaryReport delivers canary results.
+func (c *CPClient) CanaryReport(ctx context.Context, rs []store.CanaryResult) error {
+	return c.do(ctx, http.MethodPost, "/cell/v1/canary", cellapi.CanaryRequest{Results: rs}, nil)
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/avilashs/kafka_as_service/internal/engines/kafka"
 	"github.com/avilashs/kafka_as_service/internal/platform/cellapi"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -81,6 +82,10 @@ func bundleFor(t *testing.T, clusterID string) *engine.Bundle {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// every bundle carries the platform's canary user; its password is in the secret manager
+	if _, err := secretsSt.Put(context.Background(), secrets.UserPath("fake", clusterID, kafka.PlatformCanaryUser), map[string]string{"password": "test-password"}); err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 
@@ -92,6 +97,7 @@ func startTestAgent(t *testing.T, f *fakeCP, stateNS string) (*agent.Agent, cont
 	if err != nil {
 		t.Fatal(err)
 	}
+	ag.Secrets = secretsSt
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = ag.Run(ctx) }()
 	return ag, cancel

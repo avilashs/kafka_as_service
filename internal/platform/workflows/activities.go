@@ -119,6 +119,9 @@ func (a *Activities) RenderAndPublish(ctx context.Context, opID, clusterID strin
 	if c.Assignment == nil {
 		return 0, Terminal(fmt.Errorf("cluster %s has no assignment", clusterID))
 	}
+	if err := a.ensurePlatformSecrets(ctx, c); err != nil {
+		return 0, err
+	}
 	env, err := a.Store.CellEnv(ctx, c.Assignment.CellID)
 	if err != nil {
 		return 0, classify(err)
@@ -135,6 +138,32 @@ func (a *Activities) RenderAndPublish(ctx context.Context, opID, clusterID strin
 		return 0, classify(err)
 	}
 	return gen, classify(faultPoint(ActRenderPublish, nil))
+}
+
+// platformUsers are the platform's own principals; each gets a random password in the secret manager the
+// first time a bundle is rendered for the cluster (idempotent: an existing secret is kept).
+var platformUsers = []string{"platform-canary"}
+
+func (a *Activities) ensurePlatformSecrets(ctx context.Context, c *store.Cluster) error {
+	if a.Secrets == nil {
+		return Terminal(errors.New("no secret manager configured"))
+	}
+	for _, u := range platformUsers {
+		path := secrets.UserPath(c.Assignment.CellID, c.ID, u)
+		if _, _, err := a.Secrets.Get(ctx, path); err == nil {
+			continue
+		} else if !errors.Is(err, secrets.ErrNotFound) {
+			return err
+		}
+		pw, err := GeneratePassword()
+		if err != nil {
+			return err
+		}
+		if _, err := a.Secrets.Put(ctx, path, map[string]string{"password": pw}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PublishTombstone publishes a delete marker one generation above the latest

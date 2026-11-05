@@ -1,0 +1,51 @@
+# Prometheus alerting rules for the Kafka clusters of a cell (design §17). Every alert carries a runbook_url
+# that resolves to a file in docs/runbooks/; internal/placement/alerts_test.go enforces that in CI.
+# Metrics come from the Strimzi metrics reporter on every broker and controller (port 9404).
+groups:
+  - name: streamcell-kafka
+    rules:
+      - alert: StreamcellBrokerMetricsDown
+        expr: up{job="streamcell-kafka"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.pod }} in {{ $labels.namespace }} does not answer its metrics endpoint"
+          description: >-
+            The Kafka pod is down, not ready, or its metrics endpoint is unreachable. Check the pod first,
+            then the network policy of the namespace.
+          runbook_url: "docs/runbooks/kafka-broker-down.md"
+
+      - alert: StreamcellUnderMinIsr
+        expr: sum by (namespace) (kafka_server_replicamanager_underminisrpartitioncount) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.namespace }} has partitions below min.insync.replicas: producers with acks=all are failing"
+          description: >-
+            Writes to the affected partitions are refused until enough replicas are back in sync. The platform
+            marks the cluster DEGRADED after two minutes of this.
+          runbook_url: "docs/runbooks/kafka-under-min-isr.md"
+
+      - alert: StreamcellUnderReplicated
+        expr: sum by (namespace) (kafka_server_replicamanager_underreplicatedpartitions) > 0
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.namespace }} has had under-replicated partitions for 10 minutes"
+          description: >-
+            Replicas are behind or missing. Normal for a few minutes during a roll; not for ten.
+          runbook_url: "docs/runbooks/kafka-under-replicated.md"
+
+      - alert: StreamcellOfflinePartitions
+        expr: max by (namespace) (kafka_controller_kafkacontroller_offlinepartitionscount) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.namespace }} has offline partitions: no leader, no reads, no writes"
+          description: >-
+            Every replica of a partition is unavailable. This is data unavailability, not only degraded redundancy.
+          runbook_url: "docs/runbooks/kafka-offline-partitions.md"

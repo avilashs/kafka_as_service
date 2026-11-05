@@ -63,6 +63,13 @@ kubectl -n streamcell-system wait --for=condition=complete job/streamcell-admiss
 kubectl -n streamcell-system rollout status deploy/streamcell-admission --timeout=3m
 kubectl -n streamcell-system rollout status deploy/placement-auditor --timeout=3m
 
+# --- the cell's Prometheus with the alert rules ---
+kubectl apply -f "$ROOT/deploy/kind/monitoring.yaml" >/dev/null 2>&1 || true   # namespace first (the rules ConfigMap lives in it)
+kubectl -n streamcell-monitoring create configmap streamcell-rules $(for f in "$ROOT"/deploy/alerts/*.rules.yaml; do printf -- '--from-file=%s ' "$f"; done) \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl apply -f "$ROOT/deploy/kind/monitoring.yaml" >/dev/null
+kubectl -n streamcell-monitoring rollout status deploy/prometheus --timeout=3m
+
 # --- control-plane dependencies ---
 eval "$("$ROOT/hack/e2e-deps.sh" up)"
 DB_URL="${STREAMCELL_E2E_DATABASE_URL}"

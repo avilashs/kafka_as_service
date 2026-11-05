@@ -37,6 +37,63 @@ type Guard struct {
 	// binds one pod at a time, and the auditor catches anything that slips through.
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
+
+	// recent remembers the bindings this replica allowed, per node, until they show up in the API (or
+	// recentTTL passes). The per-node lock alone is released before the apiserver has persisted the
+	// binding, so a second decision made a few milliseconds later could still read an empty node; found as
+	// 2 winners in 12 in one full-suite run under CPU contention. A remembered pod that was never bound
+	// only makes the guard stricter for recentTTL (fail closed).
+	recent map[string][]recentBind
+	now    func() time.Time
+}
+
+type recentBind struct {
+	pod   placement.Pod
+	until time.Time
+}
+
+const recentTTL = 30 * time.Second
+
+func (g *Guard) clock() time.Time {
+	if g.now != nil {
+		return g.now()
+	}
+	return time.Now()
+}
+
+// recentOn returns the pods allowed onto node that the API list did not (yet) show, dropping expired ones.
+func (g *Guard) recentOn(node string, listed []placement.Pod) []placement.Pod {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	have := map[string]bool{}
+	for _, p := range listed {
+		have[p.Ref()] = true
+	}
+	var keep []recentBind
+	var extra []placement.Pod
+	now := g.clock()
+	for _, r := range g.recent[node] {
+		if now.After(r.until) || have[r.pod.Ref()] {
+			continue // expired, or the API shows it now
+		}
+		keep = append(keep, r)
+		extra = append(extra, r.pod)
+	}
+	if g.recent == nil {
+		g.recent = map[string][]recentBind{}
+	}
+	g.recent[node] = keep
+	return extra
+}
+
+func (g *Guard) remember(node string, p placement.Pod) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.recent == nil {
+		g.recent = map[string][]recentBind{}
+	}
+	p.Node = node
+	g.recent[node] = append(g.recent[node], recentBind{pod: p, until: g.clock().Add(recentTTL)})
 }
 
 func (g *Guard) nodeLock(node string) *sync.Mutex {
@@ -128,8 +185,10 @@ func (g *Guard) decide(ctx context.Context, req *admissionv1.AdmissionRequest) *
 		}
 		onNode = append(onNode, placement.PodFrom(p))
 	}
+	onNode = append(onNode, g.recentOn(nodeName, onNode)...)
 	vs := placement.CheckBinding(placement.PodFrom(pod), placement.NodeFrom(node), onNode)
 	if len(vs) == 0 {
+		g.remember(nodeName, placement.PodFrom(pod))
 		return &admissionv1.AdmissionResponse{Allowed: true}
 	}
 	msgs := make([]string, 0, len(vs))

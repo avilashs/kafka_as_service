@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,12 +34,16 @@ type MeteringConfig struct {
 }
 
 type meterRuntime struct {
-	cfg   MeteringConfig
-	meter *metering.Meter
-	spool *metering.Spool
+	mu        sync.Mutex // serialises ticks
+	deliverMu sync.Mutex // serialises deliveries
+	cfg       MeteringConfig
+	meter     *metering.Meter
+	spool     *metering.Spool
 }
 
 func (a *Agent) meterRT() (*meterRuntime, error) {
+	a.mrtMu.Lock()
+	defer a.mrtMu.Unlock()
 	if a.Metering == nil {
 		return nil, nil
 	}
@@ -79,6 +84,8 @@ func (a *Agent) MeterTick(ctx context.Context, now time.Time) error {
 	if err != nil || rt == nil {
 		return err
 	}
+	rt.mu.Lock() // the meter and its state file are used by one tick at a time
+	defer rt.mu.Unlock()
 	type target struct {
 		id      string
 		meters  []engine.MeterSource
@@ -141,6 +148,8 @@ func (a *Agent) MeterDeliver(ctx context.Context) error {
 	if err != nil || rt == nil {
 		return err
 	}
+	rt.deliverMu.Lock()
+	defer rt.deliverMu.Unlock()
 	for {
 		batch := rt.spool.Pending(500)
 		if len(batch) == 0 {
@@ -241,6 +250,21 @@ func (a *Agent) sample(ctx context.Context, srcs []engine.MeterSource) ([]meteri
 			}
 			if gib > 0 {
 				out = append(out, metering.Reading{Meter: s.Meter, Kind: kind, Unit: s.Unit, Value: gib})
+			}
+		case "metrics":
+			pods, err := a.runningPods(ctx, s.Namespace, s.Selector)
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range pods {
+				ss, err := a.scrapePod(ctx, s.Namespace, p.Name, s.Port, s.Path)
+				if err != nil {
+					continue // this pod's counter is missing this tick; a counter is picked up at its next reading
+				}
+				if v, ok := metricValue(ss, s.Metric, s.ExcludeTopics); ok && v >= 0 {
+					out = append(out, metering.Reading{Meter: s.Meter, Kind: kind, Unit: s.Unit, Value: int64(v),
+						Labels: map[string]string{"broker": p.Name}})
+				}
 			}
 		default:
 			return nil, fmt.Errorf("unknown meter source %q", s.Source)

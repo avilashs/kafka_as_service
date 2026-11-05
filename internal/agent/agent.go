@@ -126,6 +126,7 @@ type Agent struct {
 	// Metering, if set, makes the agent sample what its resources run and deliver billing records.
 	Metering *MeteringConfig
 	mrt      *meterRuntime
+	mrtMu    sync.Mutex
 
 	applyMu  sync.Mutex // serialises apply/delete of bundles (poll loop vs resync)
 	mu       sync.Mutex // guards the fields below
@@ -724,6 +725,9 @@ func (a *Agent) reportStatus(ctx context.Context) {
 				obs.Objects = append(obs.Objects, a.observe(ctx, r))
 			}
 			obs.Pods = a.observePods(ctx, s.refs)
+			if s.cs.bundle != nil {
+				obs.Probe = a.probeMetrics(ctx, s.cs.bundle.Probes)
+			}
 			obs.Outputs = a.readOutputs(ctx, s.cs.bundle)
 			for k, v := range a.certOutputs(ctx, s.cs.bundle) {
 				if obs.Outputs == nil {

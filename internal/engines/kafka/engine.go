@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -312,6 +313,9 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 		}
 	}
 	vals := map[string]string{"KafkaVersion": st.KafkaVersion, "MetadataVersion": st.KafkaMetadataVersion}
+	if sp, err := parseSpecJSON(rs.Spec); err == nil {
+		vals["canary.partitions"] = strconv.Itoa(sp.BrokerCount) // one canary partition per broker: each broker leads one
+	}
 	for _, l := range st.Listeners {
 		switch l.Name {
 		case "external":
@@ -371,6 +375,43 @@ func strictUnmarshal(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+var _ engine.Healther = (*Engine)(nil)
+
+// Health implements engine.Healther: broker pods that are missing or not ready, and partitions under the
+// minimum ISR when the agent reports them (probe "underMinIsrPartitions").
+func (e *Engine) Health(rs engine.ResourceSpec, obs engine.Observed) []engine.HealthSignal {
+	var out []engine.HealthSignal
+	if sp, err := parseSpecJSON(rs.Spec); err == nil && len(obs.Pods) > 0 {
+		ready, present := 0, 0
+		var down []string
+		for _, p := range obs.Pods {
+			if p.Labels["strimzi.io/broker-role"] != "true" || p.Labels["strimzi.io/kind"] != "Kafka" {
+				continue
+			}
+			present++
+			if p.Ready && !p.Terminating {
+				ready++
+			} else {
+				down = append(down, p.Name)
+			}
+		}
+		if ready < sp.BrokerCount {
+			d := fmt.Sprintf("%d of %d broker pods are ready", ready, sp.BrokerCount)
+			if len(down) > 0 {
+				d += " (not ready: " + strings.Join(down, ", ") + ")"
+			}
+			if missing := sp.BrokerCount - present; missing > 0 {
+				d += fmt.Sprintf(" (%d pods missing)", missing)
+			}
+			out = append(out, engine.HealthSignal{Kind: "brokerDown", Detail: d})
+		}
+	}
+	if v, ok := obs.Probe["underMinIsrPartitions"].(float64); ok && v > 0 {
+		out = append(out, engine.HealthSignal{Kind: "underMinIsr", Detail: fmt.Sprintf("%d partitions are under the minimum ISR", int(v))})
+	}
+	return out
 }
 
 // brokerPodsConverged checks the broker pods against the spec: exactly BrokerCount of them, all Ready,

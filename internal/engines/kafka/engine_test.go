@@ -113,8 +113,8 @@ func TestRenderDeterministic(t *testing.T) {
 func TestRenderObjectsAndLabels(t *testing.T) {
 	b := render(t, engine.TierShared, okSpec())
 	want := []string{"Namespace/kc-0123456789", "NetworkPolicy/default-deny", "NetworkPolicy/allow-same-namespace",
-		"NetworkPolicy/allow-dns-egress", "NetworkPolicy/allow-gateway-ingress", "NetworkPolicy/allow-apiserver-egress",
-		"Kafka/kc-0123456789", "KafkaNodePool/controllers", "KafkaNodePool/brokers"}
+		"NetworkPolicy/allow-dns-egress", "NetworkPolicy/allow-gateway-ingress", "NetworkPolicy/allow-apiserver-egress", "NetworkPolicy/allow-metrics-ingress",
+		"Kafka/kc-0123456789", "KafkaNodePool/controllers", "KafkaNodePool/brokers", "KafkaUser/platform-canary"}
 	var got []string
 	for _, o := range b.Objects {
 		got = append(got, o.GetKind()+"/"+o.GetName())
@@ -458,8 +458,8 @@ func TestAuthorizationAndPluginImage(t *testing.T) {
 		t.Errorf("authorization = %v", az)
 	}
 	supers, _ := az["superUsers"].([]any)
-	if len(supers) != 2 {
-		t.Errorf("superUsers = %v (the User Operator and Cruise Control only)", supers)
+	if len(supers) != 3 {
+		t.Errorf("superUsers = %v (the User Operator, Cruise Control and the platform canary only)", supers)
 	}
 	img, _, _ := unstructured.NestedString(k.Object, "spec", "kafka", "image")
 	if img != "registry.example/kafka:4.3.1" {

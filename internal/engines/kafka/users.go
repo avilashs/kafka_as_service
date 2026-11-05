@@ -335,6 +335,34 @@ func parseSpecJSON(spec json.RawMessage) (Spec, error) {
 
 func userSecretName(user string) string { return "user-" + user }
 
+// PlatformCanaryUser is the platform's own principal for the per-cell canary (design §15.1: a super user with
+// a credential of its own). Tenants cannot create a user with this name: "platform" is a reserved prefix.
+const PlatformCanaryUser = "platform-canary"
+
+// renderPlatformUsers returns the KafkaUser and the secret of the platform's principals. The user has no ACLs:
+// it is a super user (see authorization.superUsers), which is how it may use the "__"-named canary topic that
+// the authorizer keeps from everyone else.
+func renderPlatformUsers(clusterID, cell string, common map[string]any) (map[string]any, engine.SecretMaterial) {
+	u := map[string]any{
+		"apiVersion": "kafka.strimzi.io/v1",
+		"kind":       "KafkaUser",
+		"metadata": map[string]any{
+			"name": PlatformCanaryUser, "namespace": clusterID,
+			"labels":      merge(common, map[string]any{"strimzi.io/cluster": clusterID}),
+			"annotations": map[string]any{labels.Prefix + "password-version": "1"},
+		},
+		"spec": map[string]any{
+			"authentication": map[string]any{
+				"type":     "scram-sha-512",
+				"password": map[string]any{"valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": userSecretName(PlatformCanaryUser), "key": "password"}}},
+			},
+		},
+	}
+	m := engine.SecretMaterial{Namespace: clusterID, Name: userSecretName(PlatformCanaryUser), Labels: map[string]string{labels.Inventory: clusterID},
+		Data: map[string]secrets.Ref{"password": {Path: secrets.UserPath(cell, clusterID, PlatformCanaryUser), Key: "password", Version: 1}}}
+	return u, m
+}
+
 // renderUsers returns the KafkaUser objects, the secrets they need (SCRAM passwords) and the certificate
 // requests the cell must sign (tls users).
 func renderUsers(clusterID, cell string, s Spec, common map[string]any) (objs []map[string]any, mats []engine.SecretMaterial, certs []engine.CertRequest) {

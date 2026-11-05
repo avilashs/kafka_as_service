@@ -164,8 +164,23 @@ func TestRenderUsers(t *testing.T) {
 	}
 
 	// Secrets are references, never values.
-	if len(b.Secrets) != 2 {
+	if len(b.Secrets) != 3 { // alice, reader and the platform's canary principal
 		t.Fatalf("secrets = %+v", b.Secrets)
+	}
+	if pk := find(b, "KafkaUser", PlatformCanaryUser); pk == nil {
+		t.Error("the platform canary user is not rendered")
+	} else if _, has, _ := unstructured.NestedMap(pk.Object, "spec", "authorization"); has {
+		t.Error("the canary is a super user and carries no ACLs")
+	}
+	if k := find(b, "Kafka", "kc-0123456789"); k != nil {
+		az, _, _ := unstructured.NestedMap(k.Object, "spec", "kafka", "authorization")
+		found := false
+		for _, su := range az["superUsers"].([]any) {
+			found = found || su == PlatformCanaryUser
+		}
+		if !found {
+			t.Errorf("superUsers lacks the canary: %v", az["superUsers"])
+		}
 	}
 	for _, m := range b.Secrets {
 		ref := m.Data["password"]

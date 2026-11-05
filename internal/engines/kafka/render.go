@@ -29,7 +29,9 @@ const (
 	RoleController = "kafka-controller"
 	ExternalPort   = 9094
 	// MTLSPort is the external listener for certificate-authenticated clients (own hosts, own port: Q-4).
-	MTLSPort        = 9095
+	MTLSPort = 9095
+	// MetricsPort is where the Strimzi metrics reporter serves Prometheus text on every Kafka pod.
+	MetricsPort     = 9404
 	InternalTLSPort = 9093
 
 	// AuthorizerClass is the platform authorizer in the derived Kafka image (plugins/kafka).
@@ -72,6 +74,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	if len(env.APIServerCIDRs) > 0 {
 		objs = append(objs, netpolAPIServer(ns, common, env.APIServerCIDRs))
 	}
+	objs = append(objs, netpolMetricsIngress(ns, common, env))
 
 	kafka := map[string]any{
 		"apiVersion": "kafka.strimzi.io/v1",
@@ -126,9 +129,16 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 					"type":             "custom",
 					"authorizerClass":  AuthorizerClass,
 					"supportsAdminApi": true,
-					"superUsers":       []any{"CN=" + rs.ID + "-entity-user-operator", "CN=" + rs.ID + "-cruise-control"},
+					"superUsers":       []any{"CN=" + rs.ID + "-entity-user-operator", "CN=" + rs.ID + "-cruise-control", PlatformCanaryUser},
 				},
-				"rack":   map[string]any{"topologyKey": "topology.kubernetes.io/zone"},
+				"rack": map[string]any{"topologyKey": "topology.kubernetes.io/zone"},
+				// Broker and controller metrics for the cell's Prometheus, the health probes and the data meters.
+				// An allow list keeps the series count (and what a scraper could learn) small.
+				"metricsConfig": map[string]any{"type": "strimziMetricsReporter", "values": map[string]any{"allowList": []any{
+					"kafka_server_brokertopicmetrics_bytesin_total", "kafka_server_brokertopicmetrics_bytesout_total",
+					"kafka_server_replicamanager_.*", "kafka_controller_kafkacontroller_.*", "kafka_server_kafkaserver_brokerstate",
+					"kafka_cluster_partition_underminisr", "kafka_log_log_size",
+				}}},
 				"config": effectiveConfig(s.Config),
 				"template": map[string]any{
 					"podDisruptionBudget": map[string]any{"maxUnavailable": 0},
@@ -190,6 +200,9 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 
 	objs = append(objs, kafka, controllers, brokers)
 	userObjs, userSecrets, userCerts := renderUsers(rs.ID, env.CellID, s, common)
+	platformUser, platformSecret := renderPlatformUsers(rs.ID, env.CellID, common)
+	userObjs = append(userObjs, platformUser)
+	userSecrets = append(userSecrets, platformSecret)
 	objs = append(objs, userObjs...)
 
 	b := &engine.Bundle{}
@@ -201,7 +214,15 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 		b.Objects = append(b.Objects, u)
 	}
 	b.DeleteGraceSeconds = 20
+	b.Probes = []engine.ProbeSource{
+		{Name: "underMinIsrPartitions", Namespace: rs.ID, Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true", Port: MetricsPort, Path: "/metrics",
+			Metric: "kafka_server_replicamanager_underminisrpartitioncount", Agg: "sum"},
+	}
 	b.Meters = []engine.MeterSource{
+		{Meter: "data_in_bytes", Kind: "counter", Unit: "bytes", Source: "metrics", Namespace: rs.ID, Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true",
+			Port: MetricsPort, Path: "/metrics", Metric: "kafka_server_brokertopicmetrics_bytesin_total", ExcludeTopics: []string{"__platform_canary"}},
+		{Meter: "data_out_bytes", Kind: "counter", Unit: "bytes", Source: "metrics", Namespace: rs.ID, Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true",
+			Port: MetricsPort, Path: "/metrics", Metric: "kafka_server_brokertopicmetrics_bytesout_total", ExcludeTopics: []string{"__platform_canary"}},
 		{Meter: "broker_hours", Kind: "gauge", Unit: "broker-seconds", Source: "pods", Namespace: rs.ID,
 			Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true", GroupByLabel: labels.Prefix + "broker-type", LabelName: "size"},
 		{Meter: "storage_gb_hours", Kind: "gauge", Unit: "GiB-seconds", Source: "pvc-gib", Namespace: rs.ID,
@@ -493,6 +514,24 @@ func gatewayPeers(env engine.CellEnv) []any {
 			"gateway.envoyproxy.io/owning-gateway-namespace": env.GatewayNS,
 		}},
 	}}
+}
+
+// netpolMetricsIngress lets the cell's Prometheus (and the API server, which carries the agent's pod-proxy
+// scrapes) reach the metrics port, and nothing else.
+func netpolMetricsIngress(ns string, common map[string]any, env engine.CellEnv) map[string]any {
+	from := []any{}
+	if env.MonitoringNS != "" {
+		from = append(from, map[string]any{"namespaceSelector": map[string]any{
+			"matchLabels": map[string]any{"kubernetes.io/metadata.name": env.MonitoringNS}}})
+	}
+	for _, c := range env.APIServerCIDRs {
+		from = append(from, map[string]any{"ipBlock": map[string]any{"cidr": c}})
+	}
+	spec := map[string]any{"podSelector": map[string]any{}, "policyTypes": []any{"Ingress"}}
+	if len(from) > 0 {
+		spec["ingress"] = []any{map[string]any{"from": from, "ports": []any{map[string]any{"protocol": "TCP", "port": MetricsPort}}}}
+	}
+	return netpol("allow-metrics-ingress", ns, common, spec)
 }
 
 func netpolAPIServer(ns string, common map[string]any, cidrs []string) map[string]any {

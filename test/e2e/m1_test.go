@@ -31,8 +31,8 @@ func assertClusterObjects(t *testing.T, clusterID string) {
 		t.Fatalf("want 2 KafkaNodePools, got %d (%v)", len(pools.Items), err)
 	}
 	nps, err := kube.NetworkingV1().NetworkPolicies(clusterID).List(ctx, sel)
-	if err != nil || len(nps.Items) != 5 {
-		t.Fatalf("want 5 NetworkPolicies, got %d (%v)", len(nps.Items), err)
+	if err != nil || len(nps.Items) != 6 {
+		t.Fatalf("want 6 NetworkPolicies, got %d (%v)", len(nps.Items), err)
 	}
 	for _, p := range pools.Items {
 		if p.GetLabels()["strimzi.io/cluster"] != clusterID {

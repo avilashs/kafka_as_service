@@ -39,6 +39,10 @@ type Conn struct {
 	Extra     []kgo.Opt // test hooks
 }
 
+// Options returns the franz-go options that reach the cluster as described (SCRAM, TLS against the given CA,
+// optional relay address).
+func (c Conn) Options() ([]kgo.Opt, error) { return c.opts() }
+
 func (c Conn) opts() ([]kgo.Opt, error) {
 	opts := []kgo.Opt{kgo.SeedBrokers(c.Bootstrap), kgo.ClientID("streamcell-loadgen")}
 	if c.User != "" {

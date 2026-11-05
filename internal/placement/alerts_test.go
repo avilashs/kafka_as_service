@@ -26,13 +26,21 @@ type ruleFile struct {
 // the link does not resolve, or an alert refers to a rule the auditor does not define.
 func TestEveryAlertHasAnExistingRunbook(t *testing.T) {
 	root := filepath.Join("..", "..")
-	raw, err := os.ReadFile(filepath.Join(root, "deploy", "alerts", "placement.rules.yaml"))
-	if err != nil {
-		t.Fatal(err)
+	files, _ := filepath.Glob(filepath.Join(root, "deploy", "alerts", "*.rules.yaml"))
+	if len(files) < 2 {
+		t.Fatalf("expected the placement and the kafka rule files, found %v", files)
 	}
 	var rf ruleFile
-	if err := yaml.Unmarshal(raw, &rf); err != nil {
-		t.Fatal(err)
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var one ruleFile
+		if err := yaml.Unmarshal(raw, &one); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		rf.Groups = append(rf.Groups, one.Groups...)
 	}
 	n := 0
 	known := map[string]bool{}

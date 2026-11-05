@@ -318,7 +318,7 @@ func newEnvOpts(t *testing.T, opts envOptions) *env {
 	e.temporal = tc
 	reg := engine.NewRegistry(kafka.New())
 	apiSrv := httptest.NewServer((&api.Server{Store: st, Engines: reg, Secrets: secretsSt, Auth: e.tokens, Log: logger}).Handler())
-	e.fault = &cellFault{next: (&cellapi.Server{Store: st, Log: logger, MaxWait: 2 * time.Second, PollEvery: 100 * time.Millisecond}).Handler()}
+	e.fault = &cellFault{next: (&cellapi.Server{Store: st, Log: logger, Engines: reg, MaxWait: 2 * time.Second, PollEvery: 100 * time.Millisecond}).Handler()}
 	cellSrv := httptest.NewServer(e.fault)
 	e.apiURL, e.cellURL = apiSrv.URL, cellSrv.URL
 	dctx, stopDispatch := context.WithCancel(ctx)

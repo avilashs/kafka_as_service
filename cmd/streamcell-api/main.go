@@ -20,6 +20,7 @@ import (
 	"github.com/avilashs/kafka_as_service/internal/platform/capacity"
 	"github.com/avilashs/kafka_as_service/internal/platform/cellapi"
 	"github.com/avilashs/kafka_as_service/internal/platform/engine"
+	"github.com/avilashs/kafka_as_service/internal/platform/health"
 	"github.com/avilashs/kafka_as_service/internal/platform/outbox"
 	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
@@ -63,8 +64,23 @@ func main() {
 	}
 	reg := engine.NewRegistry(kafka.New())
 	tenantSrv := &http.Server{Addr: env("LISTEN", ":8080"), Handler: (&api.Server{Store: st, Engines: reg, Secrets: sec, Auth: tokens, Log: log}).Handler(), ReadHeaderTimeout: 10 * time.Second}
-	cellSrv := &http.Server{Addr: env("CELL_LISTEN", ":8081"), Handler: (&cellapi.Server{Store: st, Log: log}).Handler(), ReadHeaderTimeout: 10 * time.Second}
+	cellSrv := &http.Server{Addr: env("CELL_LISTEN", ":8081"), Handler: (&cellapi.Server{Store: st, Log: log, Engines: reg}).Handler(), ReadHeaderTimeout: 10 * time.Second}
 
+	hc := health.Config{}
+	for env, dst := range map[string]*time.Duration{"HEALTH_EVERY": &hc.Every, "HEALTH_WINDOW": &hc.Window, "HEALTH_STALE_AFTER": &hc.StaleAfter} {
+		if d, err := time.ParseDuration(os.Getenv(env)); err == nil {
+			*dst = d
+		}
+	}
+	for env, kind := range map[string]string{"HEALTH_BROKER_DOWN_FOR": "brokerDown", "HEALTH_UNDER_MIN_ISR_FOR": "underMinIsr"} {
+		if d, err := time.ParseDuration(os.Getenv(env)); err == nil {
+			if hc.For == nil {
+				hc.For = map[string]time.Duration{"brokerDown": 5 * time.Minute, "underMinIsr": 2 * time.Minute}
+			}
+			hc.For[kind] = d
+		}
+	}
+	go (&health.Evaluator{Store: st, Engines: reg, Cfg: hc, Log: log}).Run(ctx)
 	go (&outbox.Dispatcher{Store: st, Temporal: tc, Log: log}).Run(ctx)
 	go func() {
 		alloc := &capacity.Allocator{Store: st}

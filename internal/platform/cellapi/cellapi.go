@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avilashs/kafka_as_service/internal/metering"
+	"github.com/avilashs/kafka_as_service/internal/platform/engine"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -20,6 +21,8 @@ import (
 type Server struct {
 	Store *store.Store
 	Log   *slog.Logger
+	// Engines lets the canary targets be derived from the agents' observations (nil: no targets).
+	Engines *engine.Registry
 	// MaxWait caps long-poll duration; PollEvery is the server-side check interval.
 	MaxWait   time.Duration
 	PollEvery time.Duration
@@ -44,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /cell/v1/status", s.authed(s.status))
 	mux.HandleFunc("POST /cell/v1/heartbeat", s.authed(s.heartbeat))
 	mux.HandleFunc("POST /cell/v1/metering", s.authed(s.metering))
+	mux.HandleFunc("GET /cell/v1/canary/targets", s.authed(s.canaryTargets))
+	mux.HandleFunc("POST /cell/v1/canary", s.authed(s.canaryResults))
 	return mux
 }
 
@@ -163,4 +168,63 @@ func (s *Server) metering(w http.ResponseWriter, r *http.Request, cell string) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(MeteringResponse{Acked: acked, Rejected: rejected})
+}
+
+// CanaryTarget is one cluster the cell's canary probes through its public endpoint.
+type CanaryTarget struct {
+	ClusterID  string `json:"clusterId"`
+	Bootstrap  string `json:"bootstrap"`
+	CAPEM      string `json:"caPem"`
+	Partitions int    `json:"partitions"`
+}
+
+func (s *Server) canaryTargets(w http.ResponseWriter, r *http.Request, cell string) {
+	cs, err := s.Store.ListCellClusters(r.Context(), cell)
+	if err != nil {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	out := []CanaryTarget{}
+	for _, c := range cs {
+		if c.Observed == nil || s.Engines == nil {
+			continue
+		}
+		eng, err := s.Engines.Get(c.Cluster.Engine)
+		if err != nil {
+			continue
+		}
+		st, err := eng.ObserveStatus(c.Cluster.ResourceSpec(), *c.Observed)
+		if err != nil {
+			continue
+		}
+		ep, ca := st.Values["endpoint.scram-sha-512"], c.Observed.Outputs["cluster-ca.crt"]
+		n, _ := strconv.Atoi(st.Values["canary.partitions"])
+		if ep == "" || ca == "" || n == 0 {
+			continue
+		}
+		out = append(out, CanaryTarget{ClusterID: c.Cluster.ID, Bootstrap: ep, CAPEM: ca, Partitions: n})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"targets": out})
+}
+
+// CanaryRequest is the body of POST /cell/v1/canary.
+type CanaryRequest struct {
+	Results []store.CanaryResult `json:"results"`
+}
+
+func (s *Server) canaryResults(w http.ResponseWriter, r *http.Request, cell string) {
+	var req CanaryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	n, err := s.Store.InsertCanary(r.Context(), cell, req.Results)
+	if err != nil {
+		s.Log.Error("canary results", "cell", cell, "err", err)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"accepted": n})
 }

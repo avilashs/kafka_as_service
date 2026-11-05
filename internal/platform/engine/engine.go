@@ -114,10 +114,12 @@ type CellEnv struct {
 	GatewayNS      string   `json:"gatewayNamespace"`
 	// GatewayDataPlaneNS is where the gateway implementation runs the proxy pods that carry client
 	// traffic (Envoy Gateway: its own namespace, not the Gateway object's). Defaults to GatewayNS.
-	GatewayDataPlaneNS string            `json:"gatewayDataPlaneNamespace,omitempty"`
-	LabelPrefix        string            `json:"labelPrefix"`
-	EngineImages       map[string]string `json:"engineImages,omitempty"`
-	OperatorShards     int               `json:"operatorShards"`
+	GatewayDataPlaneNS string `json:"gatewayDataPlaneNamespace,omitempty"`
+	LabelPrefix        string `json:"labelPrefix"`
+	// MonitoringNS is the namespace of the cell's Prometheus; it may scrape the metrics port of the pods.
+	MonitoringNS   string            `json:"monitoringNamespace,omitempty"`
+	EngineImages   map[string]string `json:"engineImages,omitempty"`
+	OperatorShards int               `json:"operatorShards"`
 	// DedicatedSurge is the number of extra nodes a dedicated pool may temporarily hold during rotation.
 	DedicatedSurge int `json:"dedicatedSurge,omitempty"`
 }
@@ -184,6 +186,24 @@ type MeterSource struct {
 	// GroupByLabel splits a "pods" gauge by the value of a pod label; the value becomes the record label LabelName.
 	GroupByLabel string `json:"groupByLabel,omitempty"`
 	LabelName    string `json:"labelName,omitempty"`
+	// For Source "metrics" (a counter per matching pod, label "broker"): the pod's Prometheus endpoint, the
+	// metric to read, and topics whose share is left out (the platform's own traffic is not billed).
+	Port          int      `json:"port,omitempty"`
+	Path          string   `json:"path,omitempty"`
+	Metric        string   `json:"metric,omitempty"`
+	ExcludeTopics []string `json:"excludeTopics,omitempty"`
+}
+
+// ProbeSource tells the agent to read a health gauge from the pods' Prometheus endpoints; the value goes into
+// Observed.Probe[Name]. Agg is "sum" or "max" over the pods that answered. No answer reports nothing.
+type ProbeSource struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Selector  string `json:"selector"`
+	Port      int    `json:"port"`
+	Path      string `json:"path"`
+	Metric    string `json:"metric"`
+	Agg       string `json:"agg,omitempty"`
 }
 
 // CertOutputPrefix prefixes the Observed.Outputs name under which the agent reports a signed certificate.
@@ -216,6 +236,8 @@ type Bundle struct {
 	Outputs []Output `json:"outputs,omitempty"`
 	// Meters say what the agent samples for billing.
 	Meters []MeterSource `json:"meters,omitempty"`
+	// Probes are health gauges the agent reports in Observed.Probe.
+	Probes []ProbeSource `json:"probes,omitempty"`
 	// CertRequests are signed by the agent once the CA exists (the operator creates it after the first
 	// reconcile), and reported as outputs.
 	CertRequests []CertRequest `json:"certRequests,omitempty"`
@@ -336,6 +358,18 @@ type Change struct {
 // one kind of change, which keeps every operation's safety argument local to that kind.
 type Changer interface {
 	ClassifyChange(from, to ResourceSpec) (Change, error)
+}
+
+// HealthSignal is one unhealthy condition an engine sees in an observation. The platform decides what a
+// condition that lasts means (design §17); the engine only says that it holds right now.
+type HealthSignal struct {
+	Kind   string `json:"kind"` // for example "brokerDown", "underMinIsr"
+	Detail string `json:"detail"`
+}
+
+// Healther is implemented by engines that can read health from what the agent observed.
+type Healther interface {
+	Health(spec ResourceSpec, obs Observed) []HealthSignal
 }
 
 // UserManager is implemented by engines whose resources have client users (Kafka: SCRAM users).
