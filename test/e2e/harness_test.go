@@ -315,7 +315,7 @@ func (e *env) startWorker(extraEnv ...string) *worker {
 	cmd.Env = append(os.Environ(),
 		"DATABASE_URL="+dsn, "TEMPORAL_ADDRESS="+temporalHP,
 		"STREAMCELL_POLL_INTERVAL=200ms", "STREAMCELL_ACTIVITY_TIMEOUT=4s", "STREAMCELL_HEARTBEAT_TIMEOUT=4s",
-		"STREAMCELL_READY_TIMEOUT=2m", "STREAMCELL_DELETED_TIMEOUT=2m")
+		"STREAMCELL_READY_TIMEOUT=2m", "STREAMCELL_DELETED_TIMEOUT=2m", "STREAMCELL_STABLE_AFTER=0s")
 	cmd.Env = append(cmd.Env, extraEnv...)
 	buf := &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = buf, buf

@@ -576,3 +576,41 @@ func TestClassifyChange(t *testing.T) {
 		t.Error("a user change was accepted as a spec change")
 	}
 }
+
+func TestBrokerPodsConverged(t *testing.T) {
+	sp := okSpec() // s.small x3, Kafka 4.3.1
+	bt, _ := LookupBrokerType(sp.BrokerType)
+	pod := func(name string, ready, term bool, mem int64, image string) engine.PodStatus {
+		return engine.PodStatus{Name: name, Ready: ready, Terminating: term,
+			Labels:     map[string]string{"strimzi.io/broker-role": "true", "strimzi.io/kind": "Kafka"},
+			Containers: []engine.ContainerStatus{{Name: "kafka", Image: image, MemoryLimitMiB: mem}}}
+	}
+	good := func() []engine.PodStatus {
+		return []engine.PodStatus{pod("b0", true, false, bt.MemoryMiB, "r/kafka:4.3.1-dev"), pod("b1", true, false, bt.MemoryMiB, "r/kafka:4.3.1-dev"), pod("b2", true, false, bt.MemoryMiB, "r/kafka:4.3.1-dev"),
+			{Name: "c3", Ready: false, Labels: map[string]string{"strimzi.io/controller-role": "true", "strimzi.io/kind": "Kafka"}}} // controllers are not judged
+	}
+	if why := brokerPodsConverged(sp, good()); why != "" {
+		t.Fatalf("converged state refused: %s", why)
+	}
+	if brokerPodsConverged(sp, nil) != "" {
+		t.Fatal("an agent that reports no pods must not block")
+	}
+	mut := map[string]func([]engine.PodStatus) []engine.PodStatus{
+		"old memory limit": func(p []engine.PodStatus) []engine.PodStatus { p[1].Containers[0].MemoryLimitMiB = 768; return p },
+		"old version": func(p []engine.PodStatus) []engine.PodStatus {
+			p[2].Containers[0].Image = "r/kafka:4.3.0-dev"
+			return p
+		},
+		"a pod not ready":   func(p []engine.PodStatus) []engine.PodStatus { p[0].Ready = false; return p },
+		"a pod terminating": func(p []engine.PodStatus) []engine.PodStatus { p[0].Terminating = true; return p },
+		"a broker missing":  func(p []engine.PodStatus) []engine.PodStatus { return append(p[:2], p[3]) },
+		"too many brokers": func(p []engine.PodStatus) []engine.PodStatus {
+			return append(p, pod("b9", true, false, bt.MemoryMiB, "r/kafka:4.3.1-dev"))
+		},
+	}
+	for name, f := range mut {
+		if why := brokerPodsConverged(sp, f(good())); why == "" {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

@@ -213,6 +213,7 @@ func (a *Activities) WaitForCondition(ctx context.Context, opID, clusterID strin
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var last engine.Status
+	var stableSince time.Time
 	for {
 		obs, err := a.Store.GetObserved(ctx, clusterID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -225,7 +226,14 @@ func (a *Activities) WaitForCondition(ctx context.Context, opID, clusterID strin
 			}
 			last = st
 			if st.Satisfies(cond) {
-				return st, classify(faultPoint(ActWaitFor+":"+cond.Type, nil))
+				if stableSince.IsZero() {
+					stableSince = time.Now()
+				}
+				if time.Since(stableSince) >= time.Duration(cond.StableSeconds)*time.Second {
+					return st, classify(faultPoint(ActWaitFor+":"+cond.Type, nil))
+				}
+			} else {
+				stableSince = time.Time{}
 			}
 		}
 		_ = a.Allocator.Heartbeat(ctx, opID)
@@ -306,9 +314,25 @@ func GeneratePassword() (string, error) {
 
 // PrepareUpdate creates (user.create) or replaces (user.rotate) the secret a user needs and records
 // its version in the cluster spec. It is safe to re-run: user.create keeps an existing secret.
-func (a *Activities) PrepareUpdate(ctx context.Context, opID, clusterID string) error {
-	return faultPoint(ActPrepareUpdate, a.prepareUpdate(ctx, opID, clusterID))
+func (a *Activities) PrepareUpdate(ctx context.Context, opID, clusterID string) (UpdateInfo, error) {
+	req, err := a.loadUpdate(ctx, opID)
+	if err != nil {
+		return UpdateInfo{}, classify(err)
+	}
+	return UpdateInfo{StableSeconds: StableAfter[req.Kind]}, faultPoint(ActPrepareUpdate, a.prepareUpdate(ctx, opID, clusterID))
 }
+
+// UpdateInfo is what PrepareUpdate tells the workflow about how to wait.
+type UpdateInfo struct {
+	StableSeconds int
+}
+
+// StableAfter is how long "Ready" must hold, per kind of change, before the change counts as done. Strimzi
+// starts a rebalance only after the new brokers are up, and writes some statuses at the end of a
+// reconciliation: a short window closes the gap in which everything looks done and is not. It is a bound on
+// how long we believe a status that just turned true, not a proof; the load-test verifier is the proof.
+// A variable so tests can shorten it.
+var StableAfter = map[string]int{"config": 20, "size": 30, "storage": 30, "version": 30, "scale": 90}
 
 func (a *Activities) prepareUpdate(ctx context.Context, opID, clusterID string) error {
 	req, err := a.loadUpdate(ctx, opID)

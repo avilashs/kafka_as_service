@@ -216,6 +216,10 @@ type Bundle struct {
 type Condition struct {
 	Type  string `json:"type"`
 	Value string `json:"value,omitempty"`
+	// StableSeconds, if > 0, asks that the condition has held continuously for that long before the wait
+	// ends. Operators finish some work (a rebalance that starts only after the new pods are ready) after
+	// the status already looks done; this bounds how long we believe a status that has just turned true.
+	StableSeconds int `json:"stableSeconds,omitempty"`
 }
 
 // Step is one publish-then-wait unit of an engine plan.
@@ -238,8 +242,28 @@ type ObjectStatus struct {
 	Status     json.RawMessage `json:"status,omitempty"`
 }
 
+// PodStatus is what the agent reports about one pod of the resource's namespace. It lets an engine check
+// that the cell has converged on what was published by looking at the pods themselves, instead of
+// trusting an operator's status field to say so at the right moment.
+type PodStatus struct {
+	Name        string            `json:"name"`
+	Ready       bool              `json:"ready"`
+	Terminating bool              `json:"terminating,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"` // only the operator's and the platform's labels
+	Containers  []ContainerStatus `json:"containers,omitempty"`
+}
+
+// ContainerStatus is the part of a container's spec an engine checks after a change.
+type ContainerStatus struct {
+	Name           string `json:"name"`
+	Image          string `json:"image"`
+	MemoryLimitMiB int64  `json:"memoryLimitMiB,omitempty"`
+}
+
 // Observed is the raw observation of a resource, as reported by the cell agent.
 type Observed struct {
+	// Pods are the pods of the resource's namespaces (absent when the agent does not report them).
+	Pods       []PodStatus       `json:"pods,omitempty"`
 	Generation int64             `json:"generation"` // bundle generation the agent last applied
 	Deleted    bool              `json:"deleted"`    // tombstone fully applied
 	Objects    []ObjectStatus    `json:"objects"`

@@ -171,7 +171,8 @@ func UpdateCluster(ctx workflow.Context, in Input) error {
 		return workflow.ExecuteActivity(sctx, a.FailUpdate, in.OperationID, in.ClusterID, opError(cause)).Get(ctx, nil)
 	}
 	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "prepare").Get(ctx, nil)
-	if err := workflow.ExecuteActivity(sctx, a.PrepareUpdate, in.OperationID, in.ClusterID).Get(ctx, nil); err != nil {
+	var info UpdateInfo
+	if err := workflow.ExecuteActivity(sctx, a.PrepareUpdate, in.OperationID, in.ClusterID).Get(ctx, &info); err != nil {
 		return fail(err)
 	}
 	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "publish-desired-state").Get(ctx, nil)
@@ -181,7 +182,7 @@ func UpdateCluster(ctx workflow.Context, in Input) error {
 	}
 	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "wait-ready").Get(ctx, nil)
 	var st engine.Status
-	if err := workflow.ExecuteActivity(waitOpts(ctx, ReadyTimeout), a.WaitForCondition, in.OperationID, in.ClusterID, gen, engine.Condition{Type: "Ready"}).Get(ctx, &st); err != nil {
+	if err := workflow.ExecuteActivity(waitOpts(ctx, ReadyTimeout), a.WaitForCondition, in.OperationID, in.ClusterID, gen, engine.Condition{Type: "Ready", StableSeconds: info.StableSeconds}).Get(ctx, &st); err != nil {
 		return fail(err)
 	}
 	_ = workflow.ExecuteActivity(sctx, ActMarkStep, in.OperationID, "finish").Get(ctx, nil)

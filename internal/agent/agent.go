@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -718,6 +719,7 @@ func (a *Agent) reportStatus(ctx context.Context) {
 			for _, r := range s.refs {
 				obs.Objects = append(obs.Objects, a.observe(ctx, r))
 			}
+			obs.Pods = a.observePods(ctx, s.refs)
 			obs.Outputs = a.readOutputs(ctx, s.cs.bundle)
 			for k, v := range a.certOutputs(ctx, s.cs.bundle) {
 				if obs.Outputs == nil {
@@ -745,6 +747,43 @@ func (a *Agent) reportStatus(ctx context.Context) {
 	}
 	a.mu.Unlock()
 	_ = a.saveState(ctx)
+}
+
+// observePods lists the pods of every namespace the cluster owns, in the compact form the engine checks.
+func (a *Agent) observePods(ctx context.Context, refs []ObjectRef) []engine.PodStatus {
+	seen := map[string]bool{}
+	var out []engine.PodStatus
+	for _, r := range refs {
+		if r.Kind != "Namespace" || seen[r.Name] {
+			continue
+		}
+		seen[r.Name] = true
+		pods, err := a.Kube.CoreV1().Pods(r.Name).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			continue
+		}
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			ps := engine.PodStatus{Name: p.Name, Terminating: p.DeletionTimestamp != nil, Labels: map[string]string{}}
+			for k, v := range p.Labels {
+				if strings.HasPrefix(k, "strimzi.io/") || strings.HasPrefix(k, "streamcell.dev/") {
+					ps.Labels[k] = v
+				}
+			}
+			for _, c := range p.Status.Conditions {
+				if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+					ps.Ready = true
+				}
+			}
+			for _, c := range p.Spec.Containers {
+				ps.Containers = append(ps.Containers, engine.ContainerStatus{Name: c.Name, Image: c.Image,
+					MemoryLimitMiB: c.Resources.Limits.Memory().Value() / (1 << 20)})
+			}
+			out = append(out, ps)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func (a *Agent) observe(ctx context.Context, r ObjectRef) engine.ObjectStatus {

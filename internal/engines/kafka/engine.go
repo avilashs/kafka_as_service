@@ -334,6 +334,11 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 	// node pool status at the end of the reconciliation that handled the change, so a pool is settled when its
 	// observedGeneration has caught up; the broker pool must also have the size that was asked for.
 	sp, spErr := parseSpecJSON(rs.Spec)
+	if spErr == nil {
+		if why := brokerPodsConverged(sp, obs.Pods); why != "" {
+			return engine.Status{Reason: why, Values: vals}, nil
+		}
+	}
 	for i := range obs.Objects {
 		o := &obs.Objects[i]
 		if o.Kind != "KafkaNodePool" {
@@ -366,6 +371,49 @@ func strictUnmarshal(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+// brokerPodsConverged checks the broker pods against the spec: exactly BrokerCount of them, all Ready,
+// none terminating, each with the memory limit of the broker type and an image of the Kafka version. This
+// is what makes "Ready" mean "the change has been carried out" for changes that touch only the node pool
+// (resize, scale), where the Kafka resource's own status does not move. It returns "" when converged, and
+// also when the agent reports no pods at all (an agent that does not report pods; the other gates apply).
+func brokerPodsConverged(sp Spec, pods []engine.PodStatus) string {
+	if len(pods) == 0 {
+		return ""
+	}
+	bt, ok := LookupBrokerType(sp.BrokerType)
+	if !ok {
+		return ""
+	}
+	n := 0
+	for _, p := range pods {
+		if p.Labels["strimzi.io/broker-role"] != "true" || p.Labels["strimzi.io/kind"] != "Kafka" {
+			continue
+		}
+		if p.Terminating {
+			return fmt.Sprintf("broker pod %s is terminating", p.Name)
+		}
+		n++
+		if !p.Ready {
+			return fmt.Sprintf("broker pod %s is not ready", p.Name)
+		}
+		for _, c := range p.Containers {
+			if c.Name != "kafka" {
+				continue
+			}
+			if c.MemoryLimitMiB != bt.MemoryMiB {
+				return fmt.Sprintf("broker pod %s still has memory limit %d MiB, want %d", p.Name, c.MemoryLimitMiB, bt.MemoryMiB)
+			}
+			if !strings.Contains(c.Image, sp.KafkaVersion) {
+				return fmt.Sprintf("broker pod %s still runs image %s, want Kafka %s", p.Name, c.Image, sp.KafkaVersion)
+			}
+		}
+	}
+	if n != sp.BrokerCount {
+		return fmt.Sprintf("%d broker pods, want %d", n, sp.BrokerCount)
+	}
+	return ""
 }
 
 // resourceReady reads a Strimzi resource's Ready condition for its current generation.

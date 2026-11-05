@@ -55,6 +55,11 @@ func main() {
 	if d, err := time.ParseDuration(os.Getenv("STREAMCELL_HEARTBEAT_TIMEOUT")); err == nil {
 		workflows.WaitHeartbeatTimeout = d
 	}
+	if d, err := time.ParseDuration(os.Getenv("STREAMCELL_STABLE_AFTER")); err == nil {
+		for k := range workflows.StableAfter {
+			workflows.StableAfter[k] = int(d.Seconds())
+		}
+	}
 	poll := 2 * time.Second
 	if d, err := time.ParseDuration(os.Getenv("STREAMCELL_POLL_INTERVAL")); err == nil {
 		poll = d

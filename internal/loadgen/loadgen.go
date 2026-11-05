@@ -257,7 +257,7 @@ func (r Report) OK() bool {
 }
 
 func (r Report) String() string {
-	return fmt.Sprintf("acked=%d in-log=%d lost=%d duplicated=%d corrupt=%d reordered=%d (present but unacknowledged: %d)",
+	return fmt.Sprintf("acked=%d in-log=%d lost=%d duplicated=%d corrupt=%d reordered=%d (in the log but not in this ledger: %d — earlier runs and unacknowledged records)",
 		r.Acked, r.InLog, len(r.Lost), len(r.Duplicated), len(r.Corrupt), len(r.Reordered), r.Unacked)
 }
 
