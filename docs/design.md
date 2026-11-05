@@ -719,7 +719,7 @@ Conclusion: above about 1 MB/s, the **per-GB** charge dominates, and it is the s
 
 ## 16. Lifecycle operations
 
-Every operation is a list of `Step`s from `Engine.PlanChange`. The M4 acceptance test runs each one under continuous `acks=all`, `enable.idempotence=true` load. A verifier consumes everything and checks that every acknowledged `(producerId, sequence)` and payload hash is present, then reports lost and duplicated messages.
+Every operation is a list of `Step`s from `Engine.PlanChange` (for the Kafka engine a single publish and wait: Strimzi performs the safe sequence, and "Ready" is judged on the pods, see [m4.md](milestones/m4.md)). The M4 acceptance test runs each one under continuous `acks=all`, `enable.idempotence=true` load. A verifier consumes everything and checks that every acknowledged `(producerId, sequence)` and payload hash is present, then reports lost and duplicated messages.
 
 | Operation | Steps (Kafka engine) | Safety |
 |---|---|---|
@@ -795,7 +795,7 @@ The Kafka sizes in kind are tiny (heap 256 MiB). This needs about 16 GiB of host
 | M1 | API, database, Temporal, agent, `Engine` interface, kind | Create and delete a shared cluster through the API. Kill the worker between every activity pair; assert no duplicate rows, objects or secrets. |
 | M2 | Placement, both tiers, six rules | One test per invariant. Bad-pod admission suite. 50 concurrent creates against capacity for 10. |
 | M3 | Connectivity and auth | Console producer and consumer, Admin API, and a transactional producer through the gateway hostname (kind: `/etc/hosts` or CoreDNS override, Envoy on a NodePort). A test that tenant A cannot reach B by network (connection refused or timeout from A's namespace) or with credentials (`SASL authentication failed` using A's credentials on B). |
-| M4 | Lifecycle | Each operation under `acks=all` load with the verifier: 0 lost acknowledged messages. |
+| M4 | Lifecycle | Each operation under `acks=all` load with the verifier: 0 lost acknowledged messages. **Met for config, resize, version, scale out/in on kind** ([m4.md](milestones/m4.md)); storage expansion, tier migration, node rotation outstanding. |
 | M5 | Observability and metering | Canary detects an injected outage. Metering reconciles under retries. |
 | M6 | AWS hardening | Written results for broker kill, node termination, zone outage (NACL-based zone isolation), disk full, control plane down, the noisy-neighbour OpenMessaging Benchmark comparison, and dedicated versus shared. |
 
@@ -807,8 +807,8 @@ The Kafka sizes in kind are tiny (heap 256 MiB). This needs about 16 GiB of host
 | S-2 | Strimzi shard size: reconcile latency at 25/50/100 clusters per shard | M2 / M6 |
 | S-3 | Envoy Gateway ≥ 1.9 with Strimzi `tlsroute`: passthrough works, policy attachment for connection limits on `TLSRoute`, zonal routing | M3 |
 | S-4 | **Done in M2 (from Strimzi 1.3.0 source).** The projected service-account token is mounted into the broker container *and* the rack init container, not only the init container; it is bound to the `get nodes` ClusterRole. It cannot be removed without forking. `readOnlyRootFilesystem` and `runAsNonRoot` are still to be confirmed from a real pod (the kind smoke prints them). | M2 |
-| S-5 | The EBS CSI ext4 format keeps 5 % reserved blocks; `tune2fs -m 0` releases them online | M4 |
-| S-6 | Online shared → dedicated migration without a bootstrap change | M4 |
+| S-5 | The EBS CSI ext4 format keeps 5 % reserved blocks; `tune2fs -m 0` releases them online. Needs EBS: moved to M6. | M6 |
+| S-6 | Online shared → dedicated migration without a bootstrap change. **Not done in M4**: analysis from the CRDs only, no experiment; see [m4.md](milestones/m4.md#what-is-not-done-or-not-proven). | M4 → M6 |
 | S-7 | **Done in M3** (subclass of `StandardAuthorizer`; request-type denies; `CreateAcls`/`DeleteAcls` filtering; tested in a real broker and on a real cell; found the cluster-`Create` bypass and the `strimzi.*` topics). Open: whether the User Operator removes tenant-created ACLs it does not own over time (not observed in the short CI run). See [ADR-0010](adr/0010-customer-admin-principal-and-plugins.md). | M3 |
 | S-8 | Local NVMe provisioner choice (TopoLVM versus local-static-provisioner) under Karpenter | M6 |
 | S-9 | PrivateLink with per-broker ports and private DNS names | M6 |
