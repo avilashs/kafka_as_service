@@ -24,6 +24,8 @@ type Config struct {
 	Window          time.Duration
 	MinAvailability float64
 	MinAttempts     int
+	// MinFailedAttempts: a window without a single success is judged from this many attempts (default 6, two rounds of a 3-broker cluster).
+	MinFailedAttempts int
 	// For maps an engine signal kind to how long it must last: brokerDown 5 minutes, underMinIsr 2 minutes.
 	For map[string]time.Duration
 	// StaleAfter: an observation older than this is not judged (the agent is not reporting; that is a different alarm).
@@ -41,6 +43,9 @@ func (c *Config) defaults() {
 	}
 	if c.MinAvailability == 0 {
 		c.MinAvailability = 0.99
+	}
+	if c.MinFailedAttempts == 0 {
+		c.MinFailedAttempts = 6
 	}
 	if c.MinAttempts == 0 {
 		c.MinAttempts = 20
@@ -107,7 +112,9 @@ func (e *Evaluator) EvaluateOnce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if attempts >= e.Cfg.MinAttempts {
+		// Judged on enough probes, or on a few probes that all failed: when the path is cut a round takes as long
+		// as its timeout, so the window may never hold MinAttempts of them (the kind run showed 15 attempts in 90 s).
+		if attempts >= e.Cfg.MinAttempts || (successes == 0 && attempts >= e.Cfg.MinFailedAttempts) {
 			if avail := float64(successes) / float64(attempts); avail < e.Cfg.MinAvailability {
 				active["canary"] = fmt.Sprintf("canary availability %.1f%% over %s (%d of %d round trips)", avail*100, e.Cfg.Window, successes, attempts)
 			}

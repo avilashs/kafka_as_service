@@ -148,6 +148,17 @@ func TestM5HealthDegradesAndRecovers(t *testing.T) {
 	eval()
 	wantState("ACTIVE")
 
+	// a path that is cut makes every round take its timeout, so few attempts reach the window: a window with
+	// nothing but failures is judged from two rounds on (found on the kind cell: 15 attempts in 90 s, no verdict)
+	offset.Store(130 + 400 + 400)
+	e.postCanary([]store.CanaryResult{{ClusterID: id, At: now().Add(-5 * time.Second), Attempts: 6, Successes: 0}})
+	eval()
+	wantState("DEGRADED")
+	offset.Store(130 + 400 + 400 + 400)
+	e.postCanary([]store.CanaryResult{{ClusterID: id, At: now(), Attempts: 30, Successes: 30}})
+	eval()
+	wantState("ACTIVE")
+
 	// ---- what the evaluator must leave alone ----
 	// reports for a cluster of another cell are dropped
 	if e.postCanary([]store.CanaryResult{{ClusterID: "kc-not-ours", At: now(), Attempts: 99, Successes: 0}}) != 0 {

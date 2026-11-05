@@ -1,6 +1,6 @@
 # ADR-0013: An Apache-licensed observability stack
 
-**Status:** Proposed
+**Status:** Partly built (M5): cell Prometheus + rules + runbooks, canary and health. Thanos, prom-label-proxy, Perses and Fluent Bit are not built.
 
 ## Decision
 

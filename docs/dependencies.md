@@ -35,7 +35,7 @@ Status values:
 | AWS EBS CSI driver | current | Apache-2.0 | gp3 volumes, `VolumeAttributesClass` | planned |
 | AWS Load Balancer Controller | current | Apache-2.0 | NLBs (cell gateway and dedicated) | planned |
 | TopoLVM / sig-storage local-static-provisioner | current | Apache-2.0 | Local NVMe for dedicated | eval (spike S-8) |
-| Prometheus, Alertmanager | current | Apache-2.0 | Cell metrics and alerts | planned |
+| Prometheus, Alertmanager | current | Apache-2.0 | Cell metrics and alerts | M5: Prometheus (`prom/prometheus:v3.5.0`, also `promtool` in `make check-alerts`) runs in the kind cell; Alertmanager not deployed yet |
 | kube-state-metrics, node-exporter | current | Apache-2.0 | Metrics | planned |
 | Fluent Bit | current | Apache-2.0 | Broker log shipping | planned |
 | cert-manager | current | Apache-2.0 | Optional public ACME listener certificates | optional (Q-3) |
@@ -68,7 +68,7 @@ Status values:
 | `sigs.k8s.io/controller-runtime/pkg/envtest` | Apache-2.0 | Real kube-apiserver and etcd in e2e tests |
 | `sqlc`, `oapi-codegen`, `chi` | MIT / Apache-2.0 / MIT | Planned, **not used in M1**: queries and handlers are hand-written; the stdlib `net/http` router is used |
 | `k8s.io/client-go`, `sigs.k8s.io/controller-runtime` | Apache-2.0 | Agent, auditor, webhook |
-| `github.com/twmb/franz-go` | BSD-3-Clause | Canary, probes, test verifier |
+| `github.com/twmb/franz-go` | BSD-3-Clause | Canary (M5), load generator and verifier (M4) |
 | `github.com/prometheus/client_golang` | Apache-2.0 | Metrics |
 | `github.com/testcontainers/testcontainers-go` | MIT | Integration tests |
 | AWS SDK for Go v2 | Apache-2.0 | Cloud provider implementation |

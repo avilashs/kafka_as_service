@@ -102,7 +102,7 @@ scenario_observe() {
   echo "== injected outage 1: the gateway path is cut (NetworkPolicy allow-gateway-ingress removed)"
   kubectl -n "$OBS_CID" get networkpolicy allow-gateway-ingress -o json | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.managedFields,.status)' >"$WORK/np.json"
   kubectl -n "$OBS_CID" delete networkpolicy allow-gateway-ingress >/dev/null
-  local t1; t1=$(wait_state DEGRADED 240) && obs_record PASS "cluster is DEGRADED $t1 s after the path was cut ($(obs_state | cut -d'|' -f2))" || obs_record FAIL "cluster not DEGRADED after $t1 s ($(obs_state))"
+  local t1; t1=$(wait_state DEGRADED 240) && obs_record PASS "cluster is DEGRADED $t1 s after the path was cut ($(obs_state | cut -d'|' -f2))" || { obs_record FAIL "cluster not DEGRADED after $t1 s ($(obs_state))"; echo "      canary results of the last 8 minutes (at, attempts, successes):"; "${PSQL[@]}" "SELECT to_char(at,'HH24:MI:SS') || ' ' || attempts || ' ' || successes FROM canary_results WHERE cluster_id='$OBS_CID' AND at > now() - interval '8 minutes' ORDER BY at" | sed 's/^/        /'; tail -10 "$STATE/canary.log" | cut -c1-300 | sed 's/^/      | /'; }
   [[ "$(obs_state)" == *"canary availability"* ]] && obs_record PASS "the reason names the canary" || obs_record FAIL "reason: $(obs_state)"
   check_denied "a tenant client really cannot connect while the path is cut" "timed out|Timed out|disconnected|refused|reset|failed" \
     kafka kafka-topics --bootstrap-server "$boot" --command-config "$adm" --list
@@ -136,6 +136,13 @@ scenario_observe() {
   curl -sf "http://127.0.0.1:19090/api/v1/query" --data-urlencode "query=count by (__name__) ({namespace=\"$OBS_CID\",__name__=~\"kafka_server_brokertopicmetrics.*\"})" | jq -r '.data.result[]|"    \(.metric.__name__) series=\(.value[1])"' || true
   curl -sf "http://127.0.0.1:19090/api/v1/query" --data-urlencode "query={namespace=\"$OBS_CID\",__name__=~\"kafka_server_brokertopicmetrics_bytesin.*\",topic=\"meter-load\"}" | jq -c '.data.result[]|[.metric,.value[1]]' | head -5 || true
   kill "$prom2" 2>/dev/null
+  # exactly what the agent sees: the exposition through the API server's pod proxy
+  local bpod; bpod=$(kubectl -n "$OBS_CID" get pods -l strimzi.io/kind=Kafka,strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
+  echo "  agent's view of $bpod (pod proxy, port 9404):"
+  kubectl get --raw "/api/v1/namespaces/$OBS_CID/pods/http:$bpod:9404/proxy/metrics" 2>&1 | grep -E 'brokertopicmetrics_(bytesin|bytesout)persec' | head -8 | sed 's/^/    /'
+  echo "  agent's meter state (counters):"
+  jq -c '.. | objects | select(.Meter? == "data_in_bytes")' "$STATE/metering/meter-state.json" 2>/dev/null | head -3 | sed 's/^/    /' || true
+  grep -c . "$STATE/agent.log" | sed 's/^/    agent.log lines: /'; grep 'metering' "$STATE/agent.log" | tail -5 | cut -c1-300 | sed 's/^/    /'
 
   echo "== metering: wait for closed intervals and compare with the timeline sampled by this script"
   local deadline=$((SECONDS + 900)) n m
