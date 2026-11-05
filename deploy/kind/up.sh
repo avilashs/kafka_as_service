@@ -40,7 +40,8 @@ for role in strimzi-cluster-operator-namespaced strimzi-cluster-operator-watched
 done
 kubectl -n "$OPNS" set env deploy/strimzi-cluster-operator STRIMZI_NAMESPACE- >/dev/null
 kubectl -n "$OPNS" set env deploy/strimzi-cluster-operator STRIMZI_NAMESPACE='*' \
-  STRIMZI_CUSTOM_RESOURCE_SELECTOR='streamcell.dev/operator-shard=0' >/dev/null
+  STRIMZI_CUSTOM_RESOURCE_SELECTOR='streamcell.dev/operator-shard=0' \
+  STRIMZI_NETWORK_POLICY_GENERATION=false >/dev/null
 # The operator itself runs on the control pool.
 kubectl -n "$OPNS" patch deploy strimzi-cluster-operator --type merge -p \
   '{"spec":{"template":{"spec":{"nodeSelector":{"streamcell.dev/pool":"control"},"tolerations":[{"key":"streamcell.dev/control","operator":"Exists","effect":"NoSchedule"}]}}}}'

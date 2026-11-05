@@ -113,7 +113,7 @@ func TestRenderDeterministic(t *testing.T) {
 func TestRenderObjectsAndLabels(t *testing.T) {
 	b := render(t, engine.TierShared, okSpec())
 	want := []string{"Namespace/kc-0123456789", "NetworkPolicy/default-deny", "NetworkPolicy/allow-same-namespace",
-		"NetworkPolicy/allow-dns-egress", "NetworkPolicy/allow-gateway-ingress", "NetworkPolicy/allow-apiserver-egress", "NetworkPolicy/allow-metrics-ingress",
+		"NetworkPolicy/allow-dns-egress", "NetworkPolicy/allow-gateway-ingress", "NetworkPolicy/allow-apiserver-egress", "NetworkPolicy/allow-metrics-ingress", "NetworkPolicy/allow-operator-ingress",
 		"Kafka/kc-0123456789", "KafkaNodePool/controllers", "KafkaNodePool/brokers", "KafkaUser/platform-canary"}
 	var got []string
 	for _, o := range b.Objects {

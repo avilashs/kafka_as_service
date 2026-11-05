@@ -74,7 +74,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	if len(env.APIServerCIDRs) > 0 {
 		objs = append(objs, netpolAPIServer(ns, common, env.APIServerCIDRs))
 	}
-	objs = append(objs, netpolMetricsIngress(ns, common, env))
+	objs = append(objs, netpolMetricsIngress(ns, common, env), netpolOperatorIngress(ns, common, env))
 
 	kafka := map[string]any{
 		"apiVersion": "kafka.strimzi.io/v1",
@@ -532,6 +532,24 @@ func netpolMetricsIngress(ns string, common map[string]any, env engine.CellEnv) 
 		spec["ingress"] = []any{map[string]any{"from": from, "ports": []any{map[string]any{"protocol": "TCP", "port": MetricsPort}}}}
 	}
 	return netpol("allow-metrics-ingress", ns, common, spec)
+}
+
+// netpolOperatorIngress lets the Strimzi operator reach the pods it manages (rolling restarts, Admin API checks).
+// The operator runs with STRIMZI_NETWORK_POLICY_GENERATION=false: its own policies open the metrics port to
+// every pod in the cell, which the M5 kind run caught.
+func netpolOperatorIngress(ns string, common map[string]any, env engine.CellEnv) map[string]any {
+	opns := env.OperatorNS
+	if opns == "" {
+		opns = "streamcell-operators"
+	}
+	return netpol("allow-operator-ingress", ns, common, map[string]any{
+		"podSelector": map[string]any{},
+		"policyTypes": []any{"Ingress"},
+		"ingress": []any{map[string]any{"from": []any{map[string]any{
+			"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": opns}},
+			"podSelector":       map[string]any{"matchLabels": map[string]any{"strimzi.io/kind": "cluster-operator"}},
+		}}}},
+	})
 }
 
 func netpolAPIServer(ns string, common map[string]any, cidrs []string) map[string]any {

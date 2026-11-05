@@ -117,7 +117,10 @@ type CellEnv struct {
 	GatewayDataPlaneNS string `json:"gatewayDataPlaneNamespace,omitempty"`
 	LabelPrefix        string `json:"labelPrefix"`
 	// MonitoringNS is the namespace of the cell's Prometheus; it may scrape the metrics port of the pods.
-	MonitoringNS   string            `json:"monitoringNamespace,omitempty"`
+	MonitoringNS string `json:"monitoringNamespace,omitempty"`
+	// OperatorNS is where the engine's operator runs (Strimzi). Its generated NetworkPolicies are switched off
+	// (they open the metrics port to every pod), so the engine's own policies let the operator in.
+	OperatorNS     string            `json:"operatorNamespace,omitempty"`
 	EngineImages   map[string]string `json:"engineImages,omitempty"`
 	OperatorShards int               `json:"operatorShards"`
 	// DedicatedSurge is the number of extra nodes a dedicated pool may temporarily hold during rotation.

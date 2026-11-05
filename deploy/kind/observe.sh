@@ -63,7 +63,7 @@ scenario_observe() {
   for i in $(seq 1 30); do [[ $("${PSQL[@]}" "SELECT count(*) FROM canary_results WHERE cluster_id='$OBS_CID'") -ge 3 ]] && break; sleep 5; done
   av=$(canary_availability 120); echo "  canary availability over the last 120 s: $av"
   local ok=${av%/*} all=${av#*/}
-  if [[ $all -ge 20 && $(( ok * 100 )) -ge $(( all * 99 )) ]]; then obs_record PASS "canary reports $av round trips through the public endpoint on a healthy cluster"; else obs_record FAIL "canary availability on a healthy cluster is $av"; fi
+  if [[ $all -ge 20 && $(( ok * 100 )) -ge $(( all * 99 )) ]]; then obs_record PASS "canary reports $av round trips through the public endpoint on a healthy cluster"; else obs_record FAIL "canary availability on a healthy cluster is $av"; tail -15 "$STATE/canary.log" | cut -c1-400 | sed 's/^/      | /'; fi
   [[ "$(obs_state)" == ACTIVE\|* ]] && obs_record PASS "a healthy cluster stays ACTIVE" || obs_record FAIL "cluster state while healthy: $(obs_state)"
 
   echo "== metrics: scraped by the cell's Prometheus, not reachable by anyone else"
@@ -148,6 +148,7 @@ scenario_observe() {
 
 # restart the agent the way up.sh started it
 start_agent_again() {
+  eval "$("$ROOT/hack/e2e-deps.sh" up)"
   nohup env CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="${CELL_TOKEN:-dev-cell-token}" STATE_NAMESPACE=streamcell-system NODEPOOL_PROVIDER=kind \
     KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" STATUS_EVERY=5s SECRETS_BACKEND=openbao OPENBAO_ADDR="$STREAMCELL_E2E_OPENBAO_ADDR" OPENBAO_TOKEN="$STREAMCELL_E2E_OPENBAO_TOKEN" \
     CELL_ID=kind-1 METERING_DIR="$STATE/metering" METERING_SAMPLE_EVERY=10s METERING_INTERVAL=5m "$ROOT/bin/streamcell-agent" >>"$STATE/agent.log" 2>&1 &

@@ -108,6 +108,22 @@ type probe struct {
 	mu       sync.Mutex
 	got      map[string]time.Time // record id -> arrival
 	cancel   context.CancelFunc
+
+	lastErr string    // last failure that was logged, and when: a dead cluster must not flood the log
+	lastLog time.Time //
+}
+
+// logFailure says why rounds fail. Silent failures cost a whole CI run to diagnose (M5), so they are logged at
+// WARN; the same message is repeated at most every 30 s.
+func (pr *probe) logFailure(log *slog.Logger, err error) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	msg := err.Error()
+	if msg == pr.lastErr && time.Since(pr.lastLog) < 30*time.Second {
+		return
+	}
+	pr.lastErr, pr.lastLog = msg, time.Now()
+	log.Warn("canary round failed", "cluster", pr.t.ClusterID, "err", msg)
 }
 
 // stop ends the probe's loop and closes its clients without waiting for a cluster that does not answer.
@@ -309,7 +325,7 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 	ctx, cancel := context.WithTimeout(parent, 3*p.RoundTimeout)
 	defer cancel()
 	fail := func(err error) {
-		p.Log.Debug("canary round failed", "cluster", pr.t.ClusterID, "err", err)
+		pr.logFailure(p.Log, err)
 		go pr.close() // a fresh connection next round; a frozen cluster must not hold the loop
 	}
 	if !connected {
@@ -340,6 +356,8 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 			rec.Topic = Topic
 			if err := pr.prod.ProduceSync(ctx, rec).FirstErr(); err == nil {
 				results[part].ok = true
+			} else {
+				pr.logFailure(p.Log, fmt.Errorf("produce to partition %d: %w", part, err))
 			}
 		}(part)
 	}
@@ -361,6 +379,7 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 				break
 			}
 			if time.Now().After(deadline) || ctx.Err() != nil {
+				pr.logFailure(p.Log, errors.New("a record was acknowledged but not read back in time"))
 				break
 			}
 			time.Sleep(20 * time.Millisecond)
