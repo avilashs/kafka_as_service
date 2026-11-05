@@ -124,6 +124,6 @@ start_relay() {
 }
 start_relay
 start canary CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="$CELL_TOKEN" CELL_ID=kind-1 "${SECRETS_ENV[@]}" \
-  CANARY_DIAL=127.0.0.1:443 CANARY_ROUND_EVERY=2s CANARY_REPORT_EVERY=10s CANARY_WARMUP=30s "$ROOT/bin/streamcell-canary"
+  CANARY_DIAL=127.0.0.1:443 CANARY_ROUND_EVERY=2s CANARY_REPORT_EVERY=10s CANARY_WARMUP=30s CANARY_RECONNECT_EVERY=20s "$ROOT/bin/streamcell-canary"
 for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
 echo "Local cell is up. API: http://127.0.0.1:8080 (Authorization: Bearer $TENANT_TOKEN). Logs: $STATE"

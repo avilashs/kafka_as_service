@@ -54,12 +54,13 @@ func main() {
 			}
 			return data["password"], nil
 		},
-		Report:       cp.CanaryReport,
-		DialAddr:     os.Getenv("CANARY_DIAL"), // set where the endpoint names resolve to a local relay (kind)
-		RoundEvery:   dur("CANARY_ROUND_EVERY"),
-		RoundTimeout: dur("CANARY_ROUND_TIMEOUT"),
-		ReportEvery:  dur("CANARY_REPORT_EVERY"),
-		Warmup:       dur("CANARY_WARMUP"),
+		Report:         cp.CanaryReport,
+		DialAddr:       os.Getenv("CANARY_DIAL"), // set where the endpoint names resolve to a local relay (kind)
+		RoundEvery:     dur("CANARY_ROUND_EVERY"),
+		RoundTimeout:   dur("CANARY_ROUND_TIMEOUT"),
+		ReportEvery:    dur("CANARY_REPORT_EVERY"),
+		Warmup:         dur("CANARY_WARMUP"),
+		ReconnectEvery: dur("CANARY_RECONNECT_EVERY"),
 	}
 	log.Info("canary starting", "cell", cell)
 	p.Run(ctx)

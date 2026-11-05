@@ -56,6 +56,10 @@ type Prober struct {
 	// how often results are sent (15 s). Warmup: a cluster seen for the first time is probed but not
 	// reported for this long, so the minutes after creation do not count against it.
 	RoundEvery, RoundTimeout, ReportEvery, Warmup time.Duration
+	// ReconnectEvery: clients are recreated this often (default 2 min), so that the whole path (route, TLS,
+	// authentication) is exercised by new connections too. A NetworkPolicy removed under an established
+	// connection does not break it (conntrack), the kind run showed a "cut" the canary never noticed.
+	ReconnectEvery time.Duration
 
 	mu     sync.Mutex
 	probes map[string]*probe
@@ -73,6 +77,9 @@ func (p *Prober) defaults() {
 	}
 	if p.Warmup == 0 {
 		p.Warmup = 60 * time.Second
+	}
+	if p.ReconnectEvery == 0 {
+		p.ReconnectEvery = 2 * time.Minute
 	}
 	if p.Log == nil {
 		p.Log = slog.Default()
@@ -110,6 +117,8 @@ type probe struct {
 	got      map[string]time.Time // record id -> arrival
 	cancel   context.CancelFunc
 
+	connectedAt time.Time
+
 	lastErr string    // last failure that was logged, and when: a dead cluster must not flood the log
 	lastLog time.Time //
 }
@@ -130,20 +139,24 @@ func (pr *probe) logFailure(log *slog.Logger, err error) {
 // stop ends the probe's loop and closes its clients without waiting for a cluster that does not answer.
 func (pr *probe) stop() {
 	pr.cancel()
-	go pr.close()
+	pr.drop()
 }
 
-func (pr *probe) close() {
+// drop detaches the clients at once (a later connect is not affected) and closes them in the background:
+// closing a client of a frozen cluster can take a long time.
+func (pr *probe) drop() {
 	pr.mu.Lock()
 	prod, cons := pr.prod, pr.cons
 	pr.prod, pr.cons = nil, nil
 	pr.mu.Unlock()
-	if prod != nil {
-		prod.Close()
-	}
-	if cons != nil {
-		cons.Close()
-	}
+	go func() {
+		if prod != nil {
+			prod.Close()
+		}
+		if cons != nil {
+			cons.Close()
+		}
+	}()
 }
 
 // Run probes until ctx is done. Every cluster has its own loop, so a frozen cluster delays neither the
@@ -268,6 +281,7 @@ func (p *Prober) connect(ctx context.Context, pr *probe) error {
 	pr.prod, pr.cons, pr.adm = prod, cons, kadm.NewClient(prod)
 	pr.mu.Unlock()
 	pr.topicOK = false
+	pr.connectedAt = time.Now()
 	go consume(cons, pr)
 	return nil
 }
@@ -322,11 +336,15 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 	pr.cur.attempts += n
 	connected := pr.prod != nil
 	pr.mu.Unlock()
+	if connected && time.Since(pr.connectedAt) > p.ReconnectEvery {
+		pr.drop()
+		connected = false
+	}
 	ctx, cancel := context.WithTimeout(parent, 3*p.RoundTimeout)
 	defer cancel()
 	fail := func(err error) {
 		pr.logFailure(p.Log, err)
-		go pr.close() // a fresh connection next round; a frozen cluster must not hold the loop
+		pr.drop() // a fresh connection next round; a frozen cluster must not hold the loop
 	}
 	if !connected {
 		if err := p.connect(ctx, pr); err != nil {
@@ -377,7 +395,7 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 	case <-done:
 	case <-ctx.Done():
 		pr.logFailure(p.Log, errors.New("produce did not complete within the round"))
-		go pr.close()
+		pr.drop()
 	}
 	for i := range results {
 		results[i].ok = oks[i].Load()

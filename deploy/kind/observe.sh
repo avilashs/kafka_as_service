@@ -127,6 +127,13 @@ scenario_observe() {
     -topic meter-load -ledger "$ledger" -rate 100 -producers 1 -size 200 -duration 40s >"$WORK/produce.log" 2>&1 || true
   tail -2 "$WORK/produce.log"
   local t_traffic; t_traffic=$(date +%s)
+  # what the brokers export (evidence for the meter definitions): names, and the series that carry byte counts
+  kubectl -n streamcell-monitoring port-forward svc/prometheus 19090:9090 >"$WORK/prom-forward2.log" 2>&1 &
+  local prom2=$!; sleep 4
+  echo "  metric names exported by the cluster's pods:"
+  curl -sf "http://127.0.0.1:19090/api/v1/query" --data-urlencode "query=count by (__name__) ({namespace=\"$OBS_CID\",__name__=~\"kafka_server_brokertopicmetrics.*\"})" | jq -r '.data.result[]|"    \(.metric.__name__) series=\(.value[1])"' || true
+  curl -sf "http://127.0.0.1:19090/api/v1/query" --data-urlencode "query={namespace=\"$OBS_CID\",__name__=~\"kafka_server_brokertopicmetrics_bytesin.*\",topic=\"meter-load\"}" | jq -c '.data.result[]|[.metric,.value[1]]' | head -5 || true
+  kill "$prom2" 2>/dev/null
 
   echo "== metering: wait for closed intervals and compare with the timeline sampled by this script"
   local deadline=$((SECONDS + 900)) n m

@@ -134,6 +134,9 @@ type Agent struct {
 	revision int64 // highest cell revision applied (persisted)
 	seen     int64 // highest cell revision received this process
 	paused   string
+
+	warnMu sync.Mutex
+	warned map[string]bool
 }
 
 // New builds an agent from a REST config.

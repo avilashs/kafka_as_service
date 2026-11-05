@@ -259,11 +259,14 @@ func (a *Agent) sample(ctx context.Context, srcs []engine.MeterSource) ([]meteri
 			for _, p := range pods {
 				ss, err := a.scrapePod(ctx, s.Namespace, p.Name, s.Port, s.Path)
 				if err != nil {
+					a.warnOnce("scrape:"+p.Name, "metering: cannot scrape pod", "pod", p.Name, "err", err)
 					continue // this pod's counter is missing this tick; a counter is picked up at its next reading
 				}
 				if v, ok := metricValue(ss, s.Metric, s.ExcludeTopics); ok && v >= 0 {
 					out = append(out, metering.Reading{Meter: s.Meter, Kind: kind, Unit: s.Unit, Value: int64(v),
 						Labels: map[string]string{"broker": p.Name}})
+				} else {
+					a.warnOnce("metric:"+s.Meter+p.Name, "metering: metric not exported by pod", "pod", p.Name, "metric", s.Metric, "series", len(ss))
 				}
 			}
 		default:
@@ -271,4 +274,18 @@ func (a *Agent) sample(ctx context.Context, srcs []engine.MeterSource) ([]meteri
 		}
 	}
 	return out, nil
+}
+
+// warnOnce logs a problem the first time it is seen for a key (a missing metric repeats every sampling tick).
+func (a *Agent) warnOnce(key, msg string, args ...any) {
+	a.warnMu.Lock()
+	seen := a.warned[key]
+	if a.warned == nil {
+		a.warned = map[string]bool{}
+	}
+	a.warned[key] = true
+	a.warnMu.Unlock()
+	if !seen && a.Log != nil {
+		a.Log.Warn(msg, args...)
+	}
 }
