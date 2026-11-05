@@ -15,11 +15,12 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/avilashs/kafka_as_service/internal/loadgen"
@@ -292,10 +293,11 @@ func (p *Prober) ensureTopic(ctx context.Context, pr *probe, parts int) error {
 	if !pr.topicOK {
 		resp, err := pr.adm.CreateTopic(cctx, int32(parts), p.ReplicationFactor,
 			map[string]*string{"min.insync.replicas": strp(strconv.Itoa(p.MinISR)), "retention.ms": strp("3600000")}, Topic)
-		if err != nil {
+		// kadm returns the per-topic error as err as well; an existing topic is the normal case after a reconnect.
+		if err != nil && !errors.Is(err, kerr.TopicAlreadyExists) {
 			return err
 		}
-		if resp.Err != nil && !errors.Is(resp.Err, kerrExists) && !strings.Contains(resp.Err.Error(), "TOPIC_ALREADY_EXISTS") {
+		if resp.Err != nil && !errors.Is(resp.Err, kerr.TopicAlreadyExists) {
 			return resp.Err
 		}
 		pr.topicOK, pr.partsOK = true, parts
@@ -308,8 +310,6 @@ func (p *Prober) ensureTopic(ctx context.Context, pr *probe, parts int) error {
 	}
 	return nil
 }
-
-var kerrExists = errors.New("TOPIC_ALREADY_EXISTS")
 
 func strp(s string) *string { return &s }
 
@@ -339,12 +339,20 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 		return
 	}
 	pr.seq++
+	pr.mu.Lock()
+	prod := pr.prod // close() clears the field while stragglers of an abandoned round may still run
+	pr.mu.Unlock()
+	if prod == nil {
+		pr.logFailure(p.Log, errors.New("connection closed before the round started"))
+		return
+	}
 	type sent struct {
 		id string
 		at time.Time
 		ok bool
 	}
 	results := make([]sent, n)
+	oks := make([]atomic.Bool, n) // written by the producing goroutines, which may outlive the round
 	var wg sync.WaitGroup
 	for part := 0; part < n; part++ {
 		id := fmt.Sprintf("%s-%d-%d", pr.run, pr.seq, part)
@@ -354,14 +362,26 @@ func (p *Prober) round(parent context.Context, pr *probe) {
 			defer wg.Done()
 			rec := &kgo.Record{Partition: int32(part), Value: []byte(id), Key: []byte("canary")}
 			rec.Topic = Topic
-			if err := pr.prod.ProduceSync(ctx, rec).FirstErr(); err == nil {
-				results[part].ok = true
+			if err := prod.ProduceSync(ctx, rec).FirstErr(); err == nil {
+				oks[part].Store(true)
 			} else {
 				pr.logFailure(p.Log, fmt.Errorf("produce to partition %d: %w", part, err))
 			}
 		}(part)
 	}
-	wg.Wait()
+	// ProduceSync does not return on a frozen broker when its context ends (the request is in flight), so the
+	// round waits for it only until its own deadline; closing the clients then fails the stragglers.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		pr.logFailure(p.Log, errors.New("produce did not complete within the round"))
+		go pr.close()
+	}
+	for i := range results {
+		results[i].ok = oks[i].Load()
+	}
 	deadline := time.Now().Add(p.RoundTimeout)
 	var lat []time.Duration
 	okCount := 0

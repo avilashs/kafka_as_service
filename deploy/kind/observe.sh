@@ -5,6 +5,7 @@
 #
 # The thresholds are the shortened ones of up.sh: window 90 s, broker down 60 s, round trips every 2 s.
 
+truth_pid=""
 declare -a OBS_RESULTS=()
 OBS_FAILED=0
 obs_record() { OBS_RESULTS+=("$1  $2"); echo "  [$1] $2"; [[ "$1" == FAIL ]] && OBS_FAILED=1; return 0; }
@@ -38,9 +39,9 @@ truth_sampler() { # every 5 s: epoch, running broker pods, bound GiB
 scenario_observe() {
   echo "=================== observability: canary, health, metering (M5) ==================="
   WORK=$(mktemp -d); chmod 755 "$WORK"
-  local truth_pid=""
+  truth_pid=""
   OBS_CORDONED=""
-  trap '[[ -n "$truth_pid" ]] && kill "$truth_pid" 2>/dev/null; [[ -n "$OBS_CORDONED" ]] && kubectl uncordon "$OBS_CORDONED" >/dev/null 2>&1; true' EXIT
+  trap '[[ -n "$truth_pid" ]] && kill "$truth_pid" 2>/dev/null; [[ -n "${OBS_CORDONED:-}" ]] && kubectl uncordon "$OBS_CORDONED" >/dev/null 2>&1; true' EXIT
 
   local resp op
   resp=$(api_as "$TENANT_TOKEN" POST /v1/clusters '{"name":"obs","tier":"shared","spec":{"kafkaVersion":"4.3.1","brokerType":"dev.tiny","brokerCount":3,"storage":{"sizeGiB":1}}}') || fail "create failed"

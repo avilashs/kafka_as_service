@@ -34,20 +34,23 @@ func TestCanaryDetectsAnInjectedOutage(t *testing.T) {
 
 	var mu sync.Mutex
 	var reports []store.CanaryResult
-	p := &Prober{
-		Targets: func(context.Context) ([]Target, error) {
-			return []Target{{ClusterID: "kc-test", Bootstrap: "localhost:9092", Partitions: 2}}, nil
-		},
-		Password: func(context.Context, string) (string, error) { return "", nil },
-		Report: func(_ context.Context, rs []store.CanaryResult) error {
-			mu.Lock()
-			reports = append(reports, rs...)
-			mu.Unlock()
-			return nil
-		},
-		Log:               slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		ReplicationFactor: 1, MinISR: 1, RoundEvery: 500 * time.Millisecond, RoundTimeout: 2 * time.Second, ReportEvery: 2 * time.Second, Warmup: time.Second,
+	newProber := func() *Prober {
+		return &Prober{
+			Targets: func(context.Context) ([]Target, error) {
+				return []Target{{ClusterID: "kc-test", Bootstrap: "localhost:9092", Partitions: 2}}, nil
+			},
+			Password: func(context.Context, string) (string, error) { return "", nil },
+			Report: func(_ context.Context, rs []store.CanaryResult) error {
+				mu.Lock()
+				reports = append(reports, rs...)
+				mu.Unlock()
+				return nil
+			},
+			Log:               slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			ReplicationFactor: 1, MinISR: 1, RoundEvery: 500 * time.Millisecond, RoundTimeout: 2 * time.Second, ReportEvery: 2 * time.Second, Warmup: time.Second,
+		}
 	}
+	p := newProber()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go p.Run(ctx)
@@ -95,4 +98,18 @@ func TestCanaryDetectsAnInjectedOutage(t *testing.T) {
 		t.Fatalf("unpause: %v %s", err, out)
 	}
 	waitFor("healthy round trips after recovery", 120*time.Second, after(m, func(r store.CanaryResult) bool { return r.Attempts >= 4 && r.Successes == r.Attempts }))
+
+	// A canary that starts (or reconnects) against a cluster whose canary topic already exists must not take
+	// that for a failure. Found on the kind cell: kadm returns TOPIC_ALREADY_EXISTS as the call's error, so
+	// every round after the first reconnect failed, for ever.
+	cancel()
+	time.Sleep(time.Second)
+	mu.Lock()
+	reports = nil
+	mu.Unlock()
+	p2 := newProber()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	go p2.Run(ctx2)
+	waitFor("healthy round trips from a second canary on the existing topic", 60*time.Second, after(0, func(r store.CanaryResult) bool { return r.Attempts >= 4 && r.Successes == r.Attempts }))
 }

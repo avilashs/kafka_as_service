@@ -115,7 +115,9 @@ start_relay() {
     [[ -n "$svc" ]] && break; sleep 2
   done
   [[ -n "$svc" ]] || { echo "no Envoy data-plane service for the gateway" >&2; return 1; }
-  nohup kubectl -n envoy-gateway-system port-forward --address 127.0.0.1 "$svc" 8443:443 >"$STATE/gw-forward.log" 2>&1 &
+  # kubectl port-forward exits when its pod connection breaks ("lost connection to pod", seen when the observe
+  # scenario cut the gateway's network path); a supervisor restarts it, otherwise the public path stays dead.
+  nohup bash -c 'while true; do kubectl -n envoy-gateway-system port-forward --address 127.0.0.1 "$0" 8443:443; sleep 1; done' "$svc" >"$STATE/gw-forward.log" 2>&1 &
   echo $! >"$STATE/gw-forward.pid"
   docker rm -f streamcell-gw-relay >/dev/null 2>&1 || true
   docker run -d --name streamcell-gw-relay --network host alpine/socat tcp-listen:443,fork,reuseaddr tcp:127.0.0.1:8443 >/dev/null
