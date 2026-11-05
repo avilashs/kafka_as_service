@@ -96,10 +96,31 @@ start() { # name, then command with env
   nohup env "$@" >"$STATE/$name.log" 2>&1 &
   echo $! >"$STATE/$name.pid"
 }
+# Health thresholds are shortened for the local cell (production defaults: 5 min window, 5 min broker down, 2 min under min ISR).
 start api DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" \
-  STREAMCELL_DEV_TOKENS="$TENANT_TOKEN:dev-tenant,$TENANT_B_TOKEN:tenant-b" "${SECRETS_ENV[@]}" LISTEN=127.0.0.1:8080 CELL_LISTEN=127.0.0.1:8081 "$ROOT/bin/streamcell-api"
+  STREAMCELL_DEV_TOKENS="$TENANT_TOKEN:dev-tenant,$TENANT_B_TOKEN:tenant-b" "${SECRETS_ENV[@]}" LISTEN=127.0.0.1:8080 CELL_LISTEN=127.0.0.1:8081 \
+  HEALTH_EVERY=10s HEALTH_WINDOW=90s HEALTH_BROKER_DOWN_FOR=60s HEALTH_UNDER_MIN_ISR_FOR=60s HEALTH_STALE_AFTER=2m "$ROOT/bin/streamcell-api"
 start worker DATABASE_URL="$DB_URL" TEMPORAL_ADDRESS="$STREAMCELL_E2E_TEMPORAL" "${SECRETS_ENV[@]}" "$ROOT/bin/streamcell-worker"
 start agent CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="$CELL_TOKEN" STATE_NAMESPACE=streamcell-system NODEPOOL_PROVIDER=kind \
-  KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" STATUS_EVERY=5s "${SECRETS_ENV[@]}" "$ROOT/bin/streamcell-agent"
+  KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" STATUS_EVERY=5s "${SECRETS_ENV[@]}" \
+  CELL_ID=kind-1 METERING_DIR="$STATE/metering" METERING_SAMPLE_EVERY=10s METERING_INTERVAL=5m "$ROOT/bin/streamcell-agent"
+
+# The public path from the host: Envoy's service through a port-forward, relayed to port 443 (Strimzi advertises
+# the tlsroute hosts on 443). The canary and the scenarios use it; names are not resolved, connections are dialled here.
+start_relay() {
+  local svc
+  for _ in $(seq 1 60); do
+    svc=$(kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=streamcell-gateway -o name 2>/dev/null | head -1)
+    [[ -n "$svc" ]] && break; sleep 2
+  done
+  [[ -n "$svc" ]] || { echo "no Envoy data-plane service for the gateway" >&2; return 1; }
+  nohup kubectl -n envoy-gateway-system port-forward --address 127.0.0.1 "$svc" 8443:443 >"$STATE/gw-forward.log" 2>&1 &
+  echo $! >"$STATE/gw-forward.pid"
+  docker rm -f streamcell-gw-relay >/dev/null 2>&1 || true
+  docker run -d --name streamcell-gw-relay --network host alpine/socat tcp-listen:443,fork,reuseaddr tcp:127.0.0.1:8443 >/dev/null
+}
+start_relay
+start canary CONTROL_PLANE_URL=http://127.0.0.1:8081 CELL_TOKEN="$CELL_TOKEN" CELL_ID=kind-1 "${SECRETS_ENV[@]}" \
+  CANARY_DIAL=127.0.0.1:443 CANARY_ROUND_EVERY=2s CANARY_REPORT_EVERY=10s CANARY_WARMUP=30s "$ROOT/bin/streamcell-canary"
 for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
 echo "Local cell is up. API: http://127.0.0.1:8080 (Authorization: Bearer $TENANT_TOKEN). Logs: $STATE"

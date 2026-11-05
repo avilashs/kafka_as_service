@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: "kind smoke scenario (all, dedicated, shared, connect, lifecycle)"
+        description: "kind smoke scenario (all, dedicated, shared, connect, lifecycle, observe)"
         default: all
 permissions:
   contents: read
@@ -17,6 +17,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: make fmt-check vet test
+      - run: make check-alerts
 
   kafka-plugins:
     runs-on: ubuntu-latest
@@ -41,7 +42,7 @@ jobs:
 
   kind-real-strimzi:
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 170
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -74,6 +75,8 @@ jobs:
           kubectl get kafka,kafkanodepool -A -o yaml || true
           kubectl get tlsroute,gateway -A -o yaml | head -200 || true
           kubectl get kafkauser -A -o yaml | head -200 || true
+          kubectl -n streamcell-monitoring logs deploy/prometheus --tail=60 || true
+          for f in .cache/kind/canary.log; do echo "== $f"; tail -60 "$f"; done
           for ns in $(kubectl get ns -l streamcell.dev/inventory -o name | cut -d/ -f2); do
             echo "=== $ns: pods"; kubectl -n "$ns" get pods -o wide || true
             echo "=== $ns: cruise-control logs"; kubectl -n "$ns" logs deploy/$ns-cruise-control --tail=150 || true

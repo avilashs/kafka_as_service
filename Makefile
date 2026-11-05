@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt-check e2e-deps e2e images kafka-plugins kafka-image kafka-image-4.3.0 plugin-it kind-up kind-smoke kind-down
+.PHONY: check-alerts build test vet fmt-check e2e-deps e2e images kafka-plugins kafka-image kafka-image-4.3.0 plugin-it kind-up kind-smoke kind-down
 
 build:
 	go build -o bin/ ./cmd/...
@@ -34,6 +34,11 @@ kafka-image-4.3.0: kafka-plugins
 
 plugin-it: kafka-plugins
 	KAFKA_IMAGE=$(STRIMZI_KAFKA_IMAGE) plugins/kafka/it/it.sh
+
+# Prometheus' own checker over the alert rules (the Go lint checks runbooks and placement rule names).
+PROMTOOL_IMAGE ?= prom/prometheus:v3.5.0
+check-alerts:
+	docker run --rm -v "$(CURDIR)/deploy/alerts:/rules:ro" --entrypoint promtool $(PROMTOOL_IMAGE) check rules /rules/placement.rules.yaml /rules/kafka.rules.yaml
 
 # Postgres (docker), Temporal dev server, envtest binaries.
 e2e-deps:

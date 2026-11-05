@@ -44,7 +44,12 @@ expect_fail() { # description, egrep pattern the output must match, command...
 
 # ---------- plumbing: public endpoint from the host ----------
 
+# The relay is started by up.sh (the canary needs it too) and removed by down.sh; the scenarios only use it.
 start_gateway_forward() {
+  if docker ps --format '{{.Names}}' | grep -qx streamcell-gw-relay; then echo "  gateway relay is up (started by up.sh)"; return 0; fi
+  start_gateway_forward_own
+}
+start_gateway_forward_own() {
   local svc
   svc=$(kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=streamcell-gateway -o name | head -1)
   [[ -n "$svc" ]] || { kubectl -n envoy-gateway-system get svc -o wide; fail "no Envoy data-plane service for the gateway"; }
@@ -59,10 +64,7 @@ start_gateway_forward() {
     tcp-listen:443,fork,reuseaddr tcp:127.0.0.1:8443 >/dev/null
   sleep 3
 }
-stop_gateway_forward() {
-  [[ -f "$STATE/gw-forward.pid" ]] && kill "$(cat "$STATE/gw-forward.pid")" 2>/dev/null || true
-  docker rm -f streamcell-gw-relay >/dev/null 2>&1 || true
-}
+stop_gateway_forward() { :; }
 
 WORK=""
 HOSTS=()

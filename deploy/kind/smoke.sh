@@ -14,7 +14,10 @@
 #   lifecycle  M4: config, resize, version upgrade, scale out and in, each under acks=all load with a
 #              verifier that proves no acknowledged record was lost. Implemented in lifecycle.sh.
 #
-# usage: smoke.sh [dedicated|shared|connect|lifecycle|all]
+#   observe    M5: canary detects injected outages (DEGRADED and back); metering reconciles with a sampled
+#              timeline across a frozen control plane and an agent restart. Implemented in observe.sh.
+#
+# usage: smoke.sh [dedicated|shared|connect|lifecycle|observe|all]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 STATE="$ROOT/.cache/kind"
@@ -330,13 +333,16 @@ scenario_shared() {
 source "$ROOT/deploy/kind/connect.sh"
 # shellcheck source=deploy/kind/lifecycle.sh
 source "$ROOT/deploy/kind/lifecycle.sh"
+# shellcheck source=deploy/kind/observe.sh
+source "$ROOT/deploy/kind/observe.sh"
 
 case "${1:-all}" in
   dedicated) scenario_dedicated ;;
   shared)    scenario_shared ;;
   connect)   scenario_connect ;;
   lifecycle) scenario_lifecycle ;;
-  all)       scenario_dedicated; scenario_shared; scenario_connect; scenario_lifecycle ;;
-  *) echo "usage: $0 [dedicated|shared|connect|lifecycle|all]" >&2; exit 2 ;;
+  observe)   scenario_observe ;;
+  all)       scenario_dedicated; scenario_shared; scenario_connect; scenario_lifecycle; scenario_observe ;;
+  *) echo "usage: $0 [dedicated|shared|connect|lifecycle|observe|all]" >&2; exit 2 ;;
 esac
 echo PASS
