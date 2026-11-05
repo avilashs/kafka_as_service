@@ -116,7 +116,9 @@ scenario_observe() {
   node=$(kubectl -n "$OBS_CID" get pod "$pod" -o jsonpath='{.spec.nodeName}')
   kubectl cordon "$node" >/dev/null; OBS_CORDONED="$node"; kubectl -n "$OBS_CID" delete pod "$pod" --wait=false >/dev/null
   local t3; t3=$(wait_state DEGRADED 300) && obs_record PASS "cluster is DEGRADED $t3 s after a broker was lost ($(obs_state | cut -d'|' -f2))" || obs_record FAIL "cluster not DEGRADED after $t3 s ($(obs_state))"
-  [[ "$(obs_state)" == *"broker pods are ready"* ]] && obs_record PASS "the reason names the broker pods" || obs_record FAIL "reason: $(obs_state)"
+  # the canary notices first (failed rounds); the pod signal is only believed after it has held for 60 s
+  for _ in $(seq 1 24); do [[ "$(obs_state)" == *"broker pods are ready"* ]] && break; sleep 5; done
+  [[ "$(obs_state)" == *"broker pods are ready"* ]] && obs_record PASS "the reason names the broker pods (after the pod signal held for its duration)" || obs_record FAIL "reason: $(obs_state)"
   # one broker down does not stop acks=all with RF 3 / min ISR 2: the data path still works
   retry_ok "clients still work with one broker down (RF 3, min ISR 2)" 3 kafka kafka-topics --bootstrap-server "$boot" --command-config "$adm" --list
   kubectl uncordon "$node" >/dev/null; OBS_CORDONED=""
