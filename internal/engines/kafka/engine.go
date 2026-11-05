@@ -328,20 +328,27 @@ func (e *Engine) ObserveStatus(rs engine.ResourceSpec, obs engine.Observed) (eng
 	if s := st.AutoRebalance.State; s != "" && s != "Idle" {
 		return engine.Status{Reason: "auto-rebalance in progress: " + s, Values: vals}, nil
 	}
-	// The broker pool has the size that was asked for (covers both directions of a scale).
-	if sp, err := parseSpecJSON(rs.Spec); err == nil {
-		for i := range obs.Objects {
-			o := &obs.Objects[i]
-			if o.Kind != "KafkaNodePool" || !strings.HasSuffix(o.Name, "-brokers") && o.Name != "brokers" {
-				continue
-			}
-			var ps struct {
-				Replicas int `json:"replicas"`
-			}
-			_ = json.Unmarshal(o.Status, &ps)
-			if ps.Replicas != sp.BrokerCount {
-				return engine.Status{Reason: fmt.Sprintf("broker pool has %d of %d brokers", ps.Replicas, sp.BrokerCount), Values: vals}, nil
-			}
+	// Changes to resources, storage or the number of brokers change only the KafkaNodePool, not the Kafka
+	// resource, so the Kafka resource's own generation check above cannot see them (found in the first
+	// lifecycle run: a resize was reported done in 5 s with the old limits still in place). Strimzi writes the
+	// node pool status at the end of the reconciliation that handled the change, so a pool is settled when its
+	// observedGeneration has caught up; the broker pool must also have the size that was asked for.
+	sp, spErr := parseSpecJSON(rs.Spec)
+	for i := range obs.Objects {
+		o := &obs.Objects[i]
+		if o.Kind != "KafkaNodePool" {
+			continue
+		}
+		var ps struct {
+			Replicas           int   `json:"replicas"`
+			ObservedGeneration int64 `json:"observedGeneration"`
+		}
+		_ = json.Unmarshal(o.Status, &ps)
+		if ps.ObservedGeneration < o.Generation {
+			return engine.Status{Reason: fmt.Sprintf("node pool %s: operator has not reconciled the latest generation", o.Name), Values: vals}, nil
+		}
+		if spErr == nil && (o.Name == "brokers" || strings.HasSuffix(o.Name, "-brokers")) && ps.Replicas != sp.BrokerCount {
+			return engine.Status{Reason: fmt.Sprintf("broker pool has %d of %d brokers", ps.Replicas, sp.BrokerCount), Values: vals}, nil
 		}
 	}
 	for _, c := range st.Conditions {

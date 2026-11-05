@@ -485,11 +485,11 @@ func TestObserveStatusLifecycleGates(t *testing.T) {
 	rs := spec(t, engine.TierShared, okSpec()) // 3 brokers
 	mk := func(autoRebalance string, replicas int) engine.Observed {
 		kst := `{"observedGeneration":3,"conditions":[{"type":"Ready","status":"True"}]` + autoRebalance + `}`
-		pst := fmt.Sprintf(`{"replicas":%d}`, replicas)
+		pst := fmt.Sprintf(`{"replicas":%d,"observedGeneration":2}`, replicas)
 		return engine.Observed{Generation: 1, Objects: []engine.ObjectStatus{
 			{Kind: "Kafka", Name: "kc-0123456789", Exists: true, Generation: 3, Status: json.RawMessage(kst)},
-			{Kind: "KafkaNodePool", Name: "controllers", Exists: true, Status: json.RawMessage(`{"replicas":3}`)},
-			{Kind: "KafkaNodePool", Name: "brokers", Exists: true, Status: json.RawMessage(pst)},
+			{Kind: "KafkaNodePool", Name: "controllers", Exists: true, Generation: 1, Status: json.RawMessage(`{"replicas":3,"observedGeneration":1}`)},
+			{Kind: "KafkaNodePool", Name: "brokers", Exists: true, Generation: 2, Status: json.RawMessage(pst)},
 		}}
 	}
 	cases := []struct {
@@ -503,6 +503,11 @@ func TestObserveStatusLifecycleGates(t *testing.T) {
 		{"rebalancing before scale down", mk(`,"autoRebalance":{"state":"RebalanceOnScaleDown"}`, 3), false},
 		{"brokers not all there yet", mk(``, 2), false},
 		{"brokers not removed yet", mk(``, 6), false},
+		{"node pool change not yet seen by the operator (a resize)", func() engine.Observed {
+			o := mk(``, 3)
+			o.Objects[2].Generation = 3 // the pool was changed; its status still says generation 2
+			return o
+		}(), false},
 	}
 	for _, tc := range cases {
 		st, err := e.ObserveStatus(rs, tc.obs)

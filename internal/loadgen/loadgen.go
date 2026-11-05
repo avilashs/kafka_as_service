@@ -189,10 +189,17 @@ func Produce(ctx context.Context, c Conn, o ProduceOptions) (ProduceResult, erro
 			for {
 				select {
 				case <-ctx.Done():
-					fctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+					fctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 					_ = cl.Flush(fctx)
 					cancel()
-					inflight.Wait()
+					// Records still unresolved after the flush are abandoned (counted as neither acked nor
+					// failed): waiting for them forever would hang the test behind a cluster that is down.
+					done := make(chan struct{})
+					go func() { inflight.Wait(); close(done) }()
+					select {
+					case <-done:
+					case <-time.After(30 * time.Second):
+					}
 					return
 				case <-tick.C:
 				}
@@ -294,14 +301,24 @@ func Verify(ctx context.Context, c Conn, topic, ledger string) (Report, error) {
 	}
 	defer cl.Close()
 	adm := kadm.NewClient(cl)
-	ends, err := adm.ListEndOffsets(ctx, topic)
-	if err != nil {
-		return rep, fmt.Errorf("end offsets: %w", err)
+	// The cluster may still be settling after an operation: retry for a while, never forever.
+	var ends kadm.ListedOffsets
+	for attempt := 0; ; attempt++ {
+		lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ends, err = adm.ListEndOffsets(lctx, topic)
+		cancel()
+		if err == nil && ends.Error() == nil {
+			break
+		}
+		if attempt >= 10 || ctx.Err() != nil {
+			if err == nil {
+				err = ends.Error()
+			}
+			return rep, fmt.Errorf("end offsets: %w", err)
+		}
+		time.Sleep(5 * time.Second)
 	}
 	remaining := map[int32]int64{}
-	if err := ends.Error(); err != nil {
-		return rep, fmt.Errorf("end offsets: %w", err)
-	}
 	ends.Each(func(e kadm.ListedOffset) {
 		if e.Offset > 0 {
 			remaining[e.Partition] = e.Offset

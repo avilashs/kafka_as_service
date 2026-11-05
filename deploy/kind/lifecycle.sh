@@ -35,11 +35,14 @@ start_load() {
 # finish_load <n> <description>: stop the producers, verify the ledger against the topic
 finish_load() {
   touch "$WORK/stop-$1"
+  # The producer ends on its own within ~3 minutes; never wait for it forever.
+  for _ in $(seq 1 240); do kill -0 "$LOAD_PID" 2>/dev/null || break; sleep 1; done
+  kill "$LOAD_PID" 2>/dev/null || true
   wait "$LOAD_PID" 2>/dev/null || true
   LOAD_PID=""
   local produced verdict rc=0
   produced=$(tail -1 "$WORK/produce-$1.log")
-  verdict=$(STREAMCELL_LOADTEST_PASSWORD="$LIFE_PW" "$LOADTEST" verify -bootstrap "$LIFE_BOOT" -user admin1 -ca "$WORK/ca-$LIFE_CID.pem" \
+  verdict=$(STREAMCELL_LOADTEST_PASSWORD="$LIFE_PW" timeout 900 "$LOADTEST" verify -bootstrap "$LIFE_BOOT" -user admin1 -ca "$WORK/ca-$LIFE_CID.pem" \
     -dial 127.0.0.1:443 -topic load -ledger "$WORK/ledger-$1" 2>&1) || rc=$?
   [[ $rc -eq 0 ]] || { echo "    verifier exit $rc; producer log:"; sed 's/^/      | /' "$WORK/produce-$1.log" | tail -8; }
   echo "    $produced"
@@ -67,14 +70,20 @@ run_op() {
   finish_load "$n" "$what"
   local st; st=$(api_as "$TENANT_TOKEN" GET "/v1/clusters/$LIFE_CID" | jq -r .state)
   [[ "$st" == ACTIVE ]] && life_record PASS "$what: cluster is ACTIVE afterwards" || life_record FAIL "$what: cluster state is $st"
-  local urp; urp=$(kafka kafka-topics --bootstrap-server "$LIFE_BOOT" --command-config "$LIFE_ADM" --describe --under-replicated-partitions 2>/dev/null | grep -c Topic: || true)
-  [[ "$urp" == 0 ]] && life_record PASS "$what: no under-replicated partitions afterwards" || life_record FAIL "$what: $urp under-replicated partitions afterwards"
+  # Brokers rejoin the ISR shortly after the last roll; give them up to three minutes to catch up.
+  local urp=-1 i
+  for i in $(seq 1 18); do
+    urp=$(kafka kafka-topics --bootstrap-server "$LIFE_BOOT" --command-config "$LIFE_ADM" --describe --under-replicated-partitions 2>/dev/null | grep -c Topic: || true)
+    [[ "$urp" == 0 ]] && break
+    sleep 10
+  done
+  [[ "$urp" == 0 ]] && life_record PASS "$what: no under-replicated partitions afterwards (waited up to $((i * 10))s)" || life_record FAIL "$what: $urp under-replicated partitions 3 minutes after the operation"
 }
 
 check_config() {
   local v; v=$(kubectl -n "$LIFE_CID" get kafka "$LIFE_CID" -o jsonpath='{.spec.kafka.config.log\.retention\.hours}')
   [[ "$v" == 48 ]] && life_record PASS "config: log.retention.hours=48 is in the cell" || life_record FAIL "config: log.retention.hours in the cell is '$v'"
-  local live; live=$(kafka kafka-configs --bootstrap-server "$LIFE_BOOT" --command-config "$LIFE_ADM" --describe --entity-type brokers --entity-name 3 --all 2>&1 | grep -E 'log.retention.hours' | head -1 || true)
+  local live; live=$(kafka kafka-configs --bootstrap-server "$LIFE_BOOT" --command-config "$LIFE_ADM" --describe --entity-type brokers --entity-name 0 --all 2>&1 | grep -E 'log.retention.hours' | head -1 || true)
   echo "    broker config as seen through the Admin API: ${live:-<not reported>}"
 }
 check_size() {
