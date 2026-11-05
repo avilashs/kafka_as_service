@@ -273,7 +273,9 @@ func (p *Prober) connect(ctx context.Context, pr *probe) error {
 	if err != nil {
 		return err
 	}
-	cons, err := kgo.NewClient(append(opts, kgo.ConsumeTopics(Topic), kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()),
+	// A consumer positioned "at the end" misses what is produced before its first fetch is set up, which is
+	// the first round after every reconnect; starting two seconds back loses nothing (records are matched by id).
+	cons, err := kgo.NewClient(append(opts, kgo.ConsumeTopics(Topic), kgo.ConsumeResetOffset(kgo.NewOffset().AfterMilli(time.Now().Add(-2*time.Second).UnixMilli())),
 		kgo.FetchMaxWait(500*time.Millisecond))...)
 	if err != nil {
 		prod.Close()

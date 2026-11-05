@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +72,9 @@ func main() {
 		if d, err := time.ParseDuration(os.Getenv(env)); err == nil {
 			*dst = d
 		}
+	}
+	if v, err := strconv.ParseFloat(os.Getenv("HEALTH_MIN_AVAILABILITY"), 64); err == nil && v > 0 && v <= 1 {
+		hc.MinAvailability = v
 	}
 	for env, kind := range map[string]string{"HEALTH_BROKER_DOWN_FOR": "brokerDown", "HEALTH_UNDER_MIN_ISR_FOR": "underMinIsr"} {
 		if d, err := time.ParseDuration(os.Getenv(env)); err == nil {
