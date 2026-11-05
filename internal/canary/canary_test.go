@@ -46,7 +46,7 @@ func TestCanaryDetectsAnInjectedOutage(t *testing.T) {
 				mu.Unlock()
 				return nil
 			},
-			Log:               slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			Log:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			ReconnectEvery: 3 * time.Second, ReplicationFactor: 1, MinISR: 1, RoundEvery: 500 * time.Millisecond, RoundTimeout: 2 * time.Second, ReportEvery: 2 * time.Second, Warmup: time.Second,
 		}
 	}

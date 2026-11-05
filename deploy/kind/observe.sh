@@ -139,10 +139,10 @@ scenario_observe() {
   # exactly what the agent sees: the exposition through the API server's pod proxy
   local bpod; bpod=$(kubectl -n "$OBS_CID" get pods -l strimzi.io/kind=Kafka,strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
   echo "  agent's view of $bpod (pod proxy, port 9404):"
-  kubectl get --raw "/api/v1/namespaces/$OBS_CID/pods/http:$bpod:9404/proxy/metrics" 2>&1 | grep -E 'brokertopicmetrics_(bytesin|bytesout)persec' | head -8 | sed 's/^/    /'
+  kubectl get --raw "/api/v1/namespaces/$OBS_CID/pods/http:$bpod:9404/proxy/metrics" 2>&1 | grep -E 'brokertopicmetrics_(bytesin|bytesout)persec' | head -8 | sed 's/^/    /' || true
   echo "  agent's meter state (counters):"
   jq -c '.. | objects | select(.Meter? == "data_in_bytes")' "$STATE/metering/meter-state.json" 2>/dev/null | head -3 | sed 's/^/    /' || true
-  grep -c . "$STATE/agent.log" | sed 's/^/    agent.log lines: /'; grep 'metering' "$STATE/agent.log" | tail -5 | cut -c1-300 | sed 's/^/    /'
+  { grep -c . "$STATE/agent.log" | sed 's/^/    agent.log lines: /'; grep 'metering' "$STATE/agent.log" | tail -5 | cut -c1-300 | sed 's/^/    /'; } || true
 
   echo "== metering: wait for closed intervals and compare with the timeline sampled by this script"
   local deadline=$((SECONDS + 900)) n m

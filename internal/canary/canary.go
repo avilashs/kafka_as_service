@@ -210,6 +210,7 @@ func (p *Prober) reconcile(ctx context.Context, ts []Target) {
 	}
 	for id, pr := range p.probes {
 		if t, ok := live[id]; !ok || t.Bootstrap != pr.t.Bootstrap || t.CAPEM != pr.t.CAPEM {
+			p.Log.Info("canary: stopped probing", "cluster", id)
 			pr.stop()
 			delete(p.probes, id)
 		}
@@ -220,6 +221,7 @@ func (p *Prober) reconcile(ctx context.Context, ts []Target) {
 			pctx, cancel := context.WithCancel(ctx)
 			pr = &probe{t: t, firstSee: time.Now(), run: hex.EncodeToString(randb(4)), got: map[string]time.Time{}, cancel: cancel}
 			p.probes[id] = pr
+			p.Log.Info("canary: probing", "cluster", id, "endpoint", t.Bootstrap, "partitions", t.Partitions)
 			go func() {
 				for {
 					select {

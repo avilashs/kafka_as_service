@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avilashs/kafka_as_service/internal/metering"
@@ -26,6 +27,9 @@ type Server struct {
 	// MaxWait caps long-poll duration; PollEvery is the server-side check interval.
 	MaxWait   time.Duration
 	PollEvery time.Duration
+
+	canaryMu   sync.Mutex
+	canaryLast map[string]CanaryTarget // last complete target per serving cluster
 }
 
 // DesiredResponse is the body of GET /cell/v1/desired.
@@ -185,27 +189,51 @@ func (s *Server) canaryTargets(w http.ResponseWriter, r *http.Request, cell stri
 		return
 	}
 	out := []CanaryTarget{}
+	s.canaryMu.Lock()
+	defer s.canaryMu.Unlock()
+	if s.canaryLast == nil {
+		s.canaryLast = map[string]CanaryTarget{}
+	}
+	live := map[string]bool{}
 	for _, c := range cs {
-		if c.Observed == nil || s.Engines == nil {
-			continue
+		live[c.Cluster.ID] = true
+		if t, ok := s.canaryTarget(c); ok {
+			s.canaryLast[c.Cluster.ID] = t
 		}
-		eng, err := s.Engines.Get(c.Cluster.Engine)
-		if err != nil {
-			continue
+		// A cluster that is still serving keeps being probed with the last address and CA that were known,
+		// even when its latest observation has none (an agent restarting, an operator reconciling): a target that
+		// disappears exactly when something is wrong would hide the outage (kind run: no probes during the cut).
+		if t, ok := s.canaryLast[c.Cluster.ID]; ok {
+			out = append(out, t)
 		}
-		st, err := eng.ObserveStatus(c.Cluster.ResourceSpec(), *c.Observed)
-		if err != nil {
-			continue
+	}
+	for id := range s.canaryLast {
+		if !live[id] {
+			delete(s.canaryLast, id)
 		}
-		ep, ca := st.Values["endpoint.scram-sha-512"], c.Observed.Outputs["cluster-ca.crt"]
-		n, _ := strconv.Atoi(st.Values["canary.partitions"])
-		if ep == "" || ca == "" || n == 0 {
-			continue
-		}
-		out = append(out, CanaryTarget{ClusterID: c.Cluster.ID, Bootstrap: ep, CAPEM: ca, Partitions: n})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"targets": out})
+}
+
+func (s *Server) canaryTarget(c store.CellCluster) (CanaryTarget, bool) {
+	if c.Observed == nil || s.Engines == nil {
+		return CanaryTarget{}, false
+	}
+	eng, err := s.Engines.Get(c.Cluster.Engine)
+	if err != nil {
+		return CanaryTarget{}, false
+	}
+	st, err := eng.ObserveStatus(c.Cluster.ResourceSpec(), *c.Observed)
+	if err != nil {
+		return CanaryTarget{}, false
+	}
+	ep, ca := st.Values["endpoint.scram-sha-512"], c.Observed.Outputs["cluster-ca.crt"]
+	n, _ := strconv.Atoi(st.Values["canary.partitions"])
+	if ep == "" || ca == "" || n == 0 {
+		return CanaryTarget{}, false
+	}
+	return CanaryTarget{ClusterID: c.Cluster.ID, Bootstrap: ep, CAPEM: ca, Partitions: n}, true
 }
 
 // CanaryRequest is the body of POST /cell/v1/canary.
