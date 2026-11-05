@@ -133,9 +133,10 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 				},
 				"rack": map[string]any{"topologyKey": "topology.kubernetes.io/zone"},
 				// Broker and controller metrics for the cell's Prometheus, the health probes and the data meters.
+				// (Patterns with an alternation matched nothing on the kind cell, the plain prefix pattern works.)
 				// An allow list keeps the series count (and what a scraper could learn) small.
 				"metricsConfig": map[string]any{"type": "strimziMetricsReporter", "values": map[string]any{"allowList": []any{
-					"kafka_server_brokertopicmetrics_(bytesin|bytesout)persec_total",
+					"kafka_server_brokertopicmetrics_.*",
 					"kafka_server_replicamanager_.*", "kafka_controller_kafkacontroller_.*", "kafka_server_kafkaserver_brokerstate",
 					"kafka_cluster_partition_underminisr", "kafka_log_log_size",
 				}}},
