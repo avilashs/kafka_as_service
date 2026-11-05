@@ -97,6 +97,8 @@ scenario_observe() {
   kill -CONT "$(cat "$STATE/api.pid")"
   sleep 15
 
+  # a measurement of "time to DEGRADED" needs a healthy start, not a state left over from the freeze above
+  local t0; t0=$(wait_state ACTIVE 300) && obs_record PASS "cluster is ACTIVE before the injected outages ($t0 s after the control plane was released)" || obs_record FAIL "cluster not ACTIVE before the outages ($(obs_state))"
   echo "== injected outage 1: the gateway path is cut (NetworkPolicy allow-gateway-ingress removed)"
   kubectl -n "$OBS_CID" get networkpolicy allow-gateway-ingress -o json | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.managedFields,.status)' >"$WORK/np.json"
   kubectl -n "$OBS_CID" delete networkpolicy allow-gateway-ingress >/dev/null

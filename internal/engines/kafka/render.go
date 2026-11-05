@@ -135,7 +135,7 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 				// Broker and controller metrics for the cell's Prometheus, the health probes and the data meters.
 				// An allow list keeps the series count (and what a scraper could learn) small.
 				"metricsConfig": map[string]any{"type": "strimziMetricsReporter", "values": map[string]any{"allowList": []any{
-					"kafka_server_brokertopicmetrics_.*",
+					"kafka_server_brokertopicmetrics_(bytesin|bytesout)persec_total",
 					"kafka_server_replicamanager_.*", "kafka_controller_kafkacontroller_.*", "kafka_server_kafkaserver_brokerstate",
 					"kafka_cluster_partition_underminisr", "kafka_log_log_size",
 				}}},
@@ -220,9 +220,9 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	}
 	b.Meters = []engine.MeterSource{
 		{Meter: "data_in_bytes", Kind: "counter", Unit: "bytes", Source: "metrics", Namespace: rs.ID, Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true",
-			Port: MetricsPort, Path: "/metrics", Metric: "kafka_server_brokertopicmetrics_bytesin_total", ExcludeTopics: []string{"__platform_canary"}},
+			Port: MetricsPort, Path: "/metrics", Metric: "kafka_server_brokertopicmetrics_bytesinpersec_total", ExcludeTopics: []string{"__platform_canary"}},
 		{Meter: "data_out_bytes", Kind: "counter", Unit: "bytes", Source: "metrics", Namespace: rs.ID, Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true",
-			Port: MetricsPort, Path: "/metrics", Metric: "kafka_server_brokertopicmetrics_bytesout_total", ExcludeTopics: []string{"__platform_canary"}},
+			Port: MetricsPort, Path: "/metrics", Metric: "kafka_server_brokertopicmetrics_bytesoutpersec_total", ExcludeTopics: []string{"__platform_canary"}},
 		{Meter: "broker_hours", Kind: "gauge", Unit: "broker-seconds", Source: "pods", Namespace: rs.ID,
 			Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true", GroupByLabel: labels.Prefix + "broker-type", LabelName: "size"},
 		{Meter: "storage_gb_hours", Kind: "gauge", Unit: "GiB-seconds", Source: "pvc-gib", Namespace: rs.ID,
