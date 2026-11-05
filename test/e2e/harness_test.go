@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -193,6 +194,20 @@ type env struct {
 	temporal client.Client
 	workers  []*worker
 	tokens   *tokenMap
+
+	fault    *cellFault
+	cellTok  string
+	stateNS  string
+	meterCfg *agent.MeteringConfig
+}
+
+// restartAgent stops the agent and starts a new one with the same state (the cell's ConfigMap and the
+// metering directory), as a pod restart would.
+func (e *env) restartAgent() {
+	e.t.Helper()
+	e.stopAgnt()
+	time.Sleep(300 * time.Millisecond)
+	e.startAgent(e.cellTok, e.stateNS)
 }
 
 // tokenMap is an api.Authenticator whose tokens tests can add while the server runs.
@@ -228,7 +243,42 @@ func (e *env) killWorkers() {
 	}
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvOpts(t, envOptions{}) }
+
+// envOptions are the knobs a test may turn when building its environment.
+type envOptions struct {
+	// Metering, if set, gives the agent a metering configuration (its own sampling loop is made too slow
+	// to fire: the test drives ticks with its own clock).
+	Metering *agent.MeteringConfig
+}
+
+// cellFault sits in front of the cell API and injects faults on the metering endpoint.
+type cellFault struct {
+	next http.Handler
+	down atomic.Bool  // answer 503 without processing
+	lose atomic.Int32 // process the next N requests, then answer 500 (the acknowledgement is lost)
+	seen atomic.Int32 // metering requests that reached the handler
+}
+
+func (f *cellFault) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/cell/v1/metering" {
+		if f.down.Load() {
+			http.Error(w, "control plane down (injected)", http.StatusServiceUnavailable)
+			return
+		}
+		f.seen.Add(1)
+		if f.lose.Load() > 0 {
+			f.lose.Add(-1)
+			rec := httptest.NewRecorder()
+			f.next.ServeHTTP(rec, r)                                                         // the work is done ...
+			http.Error(w, "acknowledgement lost (injected)", http.StatusInternalServerError) // ... the answer is not
+			return
+		}
+	}
+	f.next.ServeHTTP(w, r)
+}
+
+func newEnvOpts(t *testing.T, opts envOptions) *env {
 	t.Helper()
 	ctx := context.Background()
 	e := &env{t: t, cellID: "cell-" + randHex(3), tenant: "tenant-" + randHex(3), token: "tok-" + randHex(8), tokens: &tokenMap{m: map[string]string{}}}
@@ -268,7 +318,8 @@ func newEnv(t *testing.T) *env {
 	e.temporal = tc
 	reg := engine.NewRegistry(kafka.New())
 	apiSrv := httptest.NewServer((&api.Server{Store: st, Engines: reg, Secrets: secretsSt, Auth: e.tokens, Log: logger}).Handler())
-	cellSrv := httptest.NewServer((&cellapi.Server{Store: st, Log: logger, MaxWait: 2 * time.Second, PollEvery: 100 * time.Millisecond}).Handler())
+	e.fault = &cellFault{next: (&cellapi.Server{Store: st, Log: logger, MaxWait: 2 * time.Second, PollEvery: 100 * time.Millisecond}).Handler()}
+	cellSrv := httptest.NewServer(e.fault)
 	e.apiURL, e.cellURL = apiSrv.URL, cellSrv.URL
 	dctx, stopDispatch := context.WithCancel(ctx)
 	go (&outbox.Dispatcher{Store: st, Temporal: tc, Interval: 100 * time.Millisecond, Log: logger}).Run(dctx)
@@ -276,6 +327,16 @@ func newEnv(t *testing.T) *env {
 	stateNS := "agent-" + e.cellID
 	if _, err := kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: stateNS}}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
+	}
+	e.cellTok, e.stateNS = cellTok, stateNS
+	if opts.Metering != nil {
+		mc := *opts.Metering
+		mc.Cell = e.cellID
+		if mc.Dir == "" {
+			mc.Dir = t.TempDir()
+		}
+		mc.SampleEvery = 24 * time.Hour // the test calls MeterTick itself
+		e.meterCfg = &mc
 	}
 	e.startAgent(cellTok, stateNS)
 	t.Cleanup(func() {
@@ -297,6 +358,10 @@ func (e *env) startAgent(cellTok, stateNS string) {
 	}
 	ag.Secrets = secretsSt
 	ag.Pools = &kindprov.Provider{Kube: kube, SpareSelector: "test-cell=" + e.cellID}
+	if e.meterCfg != nil {
+		mc := *e.meterCfg
+		ag.Metering = &mc
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e.agent, e.stopAgnt = ag, cancel
 	go func() { _ = ag.Run(ctx) }()

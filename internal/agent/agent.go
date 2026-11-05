@@ -123,6 +123,9 @@ type Agent struct {
 	// Secrets resolves the references in bundle.Secrets. Nil means the cell has no secret manager:
 	// a bundle that needs a secret then reports an apply error.
 	Secrets secrets.Store
+	// Metering, if set, makes the agent sample what its resources run and deliver billing records.
+	Metering *MeteringConfig
+	mrt      *meterRuntime
 
 	applyMu  sync.Mutex // serialises apply/delete of bundles (poll loop vs resync)
 	mu       sync.Mutex // guards the fields below
@@ -166,6 +169,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.every(ctx, a.Cfg.StatusEvery, a.reportStatus)
 	go a.every(ctx, a.Cfg.HeartbeatEvery, a.heartbeat)
 	go a.every(ctx, a.Cfg.ResyncEvery, a.resync)
+	go a.meterLoop(ctx)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		if err := a.pollOnce(ctx); err != nil {
@@ -903,4 +907,13 @@ func (a *Agent) saveState(ctx context.Context) error {
 		return errors.New("state configmap update conflict (is a second agent running?)")
 	}
 	return err
+}
+
+// HasBundle reports whether the agent holds the rendered state of a live resource (after a restart this
+// is true again once the first poll has delivered it).
+func (a *Agent) HasBundle(clusterID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cs := a.clusters[clusterID]
+	return cs != nil && cs.bundle != nil && !cs.Tombstone
 }

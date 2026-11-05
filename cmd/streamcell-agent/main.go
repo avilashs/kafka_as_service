@@ -46,6 +46,20 @@ func main() {
 		log.Error("secrets", "err", err)
 		os.Exit(1)
 	}
+	if dir := os.Getenv("METERING_DIR"); dir != "" {
+		mc := &agent.MeteringConfig{Dir: dir, Cell: os.Getenv("CELL_ID")}
+		if mc.Cell == "" {
+			log.Error("METERING_DIR needs CELL_ID")
+			os.Exit(1)
+		}
+		if d, err := time.ParseDuration(os.Getenv("METERING_SAMPLE_EVERY")); err == nil {
+			mc.SampleEvery = d
+		}
+		if d, err := time.ParseDuration(os.Getenv("METERING_INTERVAL")); err == nil {
+			mc.Interval = d
+		}
+		a.Metering = mc
+	}
 	switch prov := os.Getenv("NODEPOOL_PROVIDER"); prov {
 	case "kind":
 		a.Pools = &kindprov.Provider{Kube: a.Kube, Log: log}

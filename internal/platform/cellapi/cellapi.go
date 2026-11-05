@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avilashs/kafka_as_service/internal/metering"
 	"github.com/avilashs/kafka_as_service/internal/platform/store"
 )
 
@@ -42,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /cell/v1/desired", s.authed(s.desired))
 	mux.HandleFunc("POST /cell/v1/status", s.authed(s.status))
 	mux.HandleFunc("POST /cell/v1/heartbeat", s.authed(s.heartbeat))
+	mux.HandleFunc("POST /cell/v1/metering", s.authed(s.metering))
 	return mux
 }
 
@@ -134,4 +136,31 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, cell string) 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// MeteringRequest is the body of POST /cell/v1/metering.
+type MeteringRequest struct {
+	Records []metering.Record `json:"records"`
+}
+
+// MeteringResponse lists what the control plane now holds (the agent may forget those) and what it refused.
+type MeteringResponse struct {
+	Acked    []string `json:"acked"`
+	Rejected []string `json:"rejected,omitempty"`
+}
+
+func (s *Server) metering(w http.ResponseWriter, r *http.Request, cell string) {
+	var req MeteringRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	acked, rejected, err := s.Store.IngestMetering(r.Context(), cell, req.Records)
+	if err != nil {
+		s.Log.Error("metering ingest", "cell", cell, "err", err)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(MeteringResponse{Acked: acked, Rejected: rejected})
 }

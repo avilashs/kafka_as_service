@@ -179,6 +179,10 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 	}
 	brokers := nodePool(rs.ID, "brokers", common, []any{"broker"}, s.BrokerCount,
 		res(bt.CPURequestMilli, bt.CPULimitMilli, bt.MemoryMiB), bt.HeapMiB, brokerStorage, brokerPod)
+	// The broker type on the pods themselves, so metering bills each pod at the size it is running at,
+	// also in the middle of a rolling resize.
+	brokerPodMeta := brokers["spec"].(map[string]any)["template"].(map[string]any)["pod"].(map[string]any)["metadata"].(map[string]any)
+	brokerPodMeta["labels"].(map[string]any)[labels.Prefix+"broker-type"] = bt.Name
 	if bt.EgressMbit > 0 {
 		meta := brokers["spec"].(map[string]any)["template"].(map[string]any)["pod"].(map[string]any)["metadata"].(map[string]any)
 		meta["annotations"] = map[string]any{"kubernetes.io/egress-bandwidth": fmt.Sprintf("%dM", bt.EgressMbit)}
@@ -197,6 +201,12 @@ func (e *Engine) Render(rs engine.ResourceSpec, a engine.Assignment, env engine.
 		b.Objects = append(b.Objects, u)
 	}
 	b.DeleteGraceSeconds = 20
+	b.Meters = []engine.MeterSource{
+		{Meter: "broker_hours", Kind: "gauge", Unit: "broker-seconds", Source: "pods", Namespace: rs.ID,
+			Selector: "strimzi.io/kind=Kafka,strimzi.io/broker-role=true", GroupByLabel: labels.Prefix + "broker-type", LabelName: "size"},
+		{Meter: "storage_gb_hours", Kind: "gauge", Unit: "GiB-seconds", Source: "pvc-gib", Namespace: rs.ID,
+			NamePrefix: "data-" + rs.ID + "-brokers-"},
+	}
 	b.Secrets = userSecrets
 	b.CertRequests = userCerts
 	// The cluster CA certificate is public; tenants need it to trust the brokers.

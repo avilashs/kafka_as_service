@@ -169,6 +169,23 @@ type Output struct {
 	Key        string `json:"key"`
 }
 
+// MeterSource tells the cell agent what to read for one meter of a resource (design §17). The agent
+// samples it and does the accounting; the engine only says where the quantity lives.
+type MeterSource struct {
+	Meter string `json:"meter"` // billing meter name, for example broker_hours
+	Kind  string `json:"kind"`  // "gauge": value x seconds; "counter": increase
+	Unit  string `json:"unit"`
+	// Source is what is read: "pods" (count of running pods), "pvc-gib" (provisioned GiB of bound
+	// volume claims).
+	Source     string `json:"source"`
+	Namespace  string `json:"namespace"`
+	Selector   string `json:"selector,omitempty"`   // label selector
+	NamePrefix string `json:"namePrefix,omitempty"` // object name prefix (when labels cannot select)
+	// GroupByLabel splits a "pods" gauge by the value of a pod label; the value becomes the record label LabelName.
+	GroupByLabel string `json:"groupByLabel,omitempty"`
+	LabelName    string `json:"labelName,omitempty"`
+}
+
 // CertOutputPrefix prefixes the Observed.Outputs name under which the agent reports a signed certificate.
 const CertOutputPrefix = "cert."
 
@@ -197,6 +214,8 @@ type Bundle struct {
 	Secrets []SecretMaterial `json:"secrets,omitempty"`
 	// Outputs are public values the agent reports back in Observed.Outputs.
 	Outputs []Output `json:"outputs,omitempty"`
+	// Meters say what the agent samples for billing.
+	Meters []MeterSource `json:"meters,omitempty"`
 	// CertRequests are signed by the agent once the CA exists (the operator creates it after the first
 	// reconcile), and reported as outputs.
 	CertRequests []CertRequest `json:"certRequests,omitempty"`

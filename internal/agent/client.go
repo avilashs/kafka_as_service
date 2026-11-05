@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/avilashs/kafka_as_service/internal/metering"
 	"io"
 	"net/http"
 	"net/url"
@@ -72,4 +73,13 @@ func (c *CPClient) Status(ctx context.Context, reports []store.StatusReport) err
 // Heartbeat pushes liveness and inventory.
 func (c *CPClient) Heartbeat(ctx context.Context, inventory any) error {
 	return c.do(ctx, http.MethodPost, "/cell/v1/heartbeat", inventory, nil)
+}
+
+// Metering delivers closed metering records and returns the IDs the control plane acknowledged.
+func (c *CPClient) Metering(ctx context.Context, recs []metering.Record) (*cellapi.MeteringResponse, error) {
+	var out cellapi.MeteringResponse
+	if err := c.do(ctx, http.MethodPost, "/cell/v1/metering", cellapi.MeteringRequest{Records: recs}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
