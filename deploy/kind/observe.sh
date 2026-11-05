@@ -149,10 +149,10 @@ scenario_observe() {
   echo "== metering: wait for closed intervals and compare with the timeline sampled by this script"
   local deadline=$((SECONDS + 900)) n m
   while (( SECONDS < deadline )); do
-    n=$("${PSQL[@]}" "SELECT count(DISTINCT interval_start) FROM metering_records WHERE cluster_id='$OBS_CID' AND meter='broker_hours'")
+    n=$("${PSQL[@]}" "SELECT count(DISTINCT interval_start) FROM metering_records WHERE cluster_id='$OBS_CID' AND meter='broker_hours' AND extract(epoch from interval_start) >= $t_active")
     # the interval that contains the traffic must be closed too
     m=$("${PSQL[@]}" "SELECT count(*) FROM metering_records WHERE cluster_id='$OBS_CID' AND meter='data_in_bytes' AND extract(epoch from interval_start) >= $((t_traffic - t_traffic % 300))")
-    [[ "$n" -ge 3 && "$m" -ge 1 ]] && break; sleep 20
+    [[ "$n" -ge 2 && "$m" -ge 1 ]] && break; sleep 20
   done
   meter_checks "$t_active"
 
