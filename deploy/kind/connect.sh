@@ -197,10 +197,16 @@ scenario_connect() {
 
   echo "== basic client flow (stock Kafka tools)"
   retry_ok "admin: kafka-topics --list through the public endpoint" 12 kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --list
-  expect_ok "admin: create topic orders-1 (3 partitions, RF 3)" \
-    kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --topic orders-1 --partitions 3 --replication-factor 3
-  expect_ok "admin: create topic private-1" \
-    kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --topic private-1 --partitions 1 --replication-factor 3
+  # Creating a topic needs every broker's own name (b0, b1, ...), not only the bootstrap name. Right after
+  # ACTIVE the first attempts can hit a broker whose route or certificate name is not there yet (seen once in
+  # CI: "No subject alternative DNS name matching b0..." for about a minute); until the M5 canary defines
+  # "reachable", the scenario waits for it and says how long it took.
+  local t0=$SECONDS
+  retry_ok "admin: create topic orders-1 (3 partitions, RF 3)" 12 \
+    kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --if-not-exists --topic orders-1 --partitions 3 --replication-factor 3
+  echo "  per-broker names reachable $((SECONDS - t0))s after the first successful bootstrap"
+  retry_ok "admin: create topic private-1" 6 \
+    kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --create --if-not-exists --topic private-1 --partitions 1 --replication-factor 3
   expect_ok "admin: describe topic (Admin API)" \
     kafka kafka-topics --bootstrap-server "$boot_a" --command-config "$adm" --describe --topic orders-1
   expect_ok "admin: describe topic configs (Admin API)" \
