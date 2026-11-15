@@ -61,6 +61,8 @@ zone_of() { node_label "$1" topology.kubernetes.io/zone; }
 run_fault() {
   local n=$1 what=$2 inject=$3 recover=$4 degraded=${5:-no} t_inject t_rec t_urp t_active
   echo "== $what"
+  # every fault starts from a healthy cluster (otherwise "DEGRADED after the fault" can be left over from the last one)
+  local t0; t0=$(wait_cluster_state ACTIVE 400) && echo "    cluster ACTIVE before the fault ($t0 s wait)" || life_record FAIL "$what: the cluster was not ACTIVE before the fault ($(cluster_state))"
   start_load "$n"
   sleep 20                                  # steady state
   t_inject=$SECONDS
