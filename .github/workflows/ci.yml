@@ -48,7 +48,7 @@ jobs:
         with: { tofu_version: 1.10.6 }
       - name: fmt
         run: tofu fmt -check -recursive -diff infra/aws
-      - name: validate (no AWS access: init without a backend, no plan, nothing is applied)
+      - name: "validate (no AWS access, init without a backend, no plan, nothing is applied)"
         working-directory: infra/aws/cell
         run: |
           tofu init -backend=false -input=false
