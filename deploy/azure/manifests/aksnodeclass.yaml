@@ -1,0 +1,10 @@
+# The cell-wide node class that Node Auto Provisioning (Karpenter on AKS) uses for the NodePools of dedicated
+# clusters (ADR-0008, internal/cloud/karpenter with the Azure node class group and kind). Field names follow the
+# documentation of karpenter.azure.com/v1beta1 and have not been applied to a real cluster.
+apiVersion: karpenter.azure.com/v1beta1
+kind: AKSNodeClass
+metadata:
+  name: streamcell
+spec:
+  imageFamily: AzureLinux
+  osDiskSizeGB: 128

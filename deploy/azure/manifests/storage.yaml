@@ -1,0 +1,15 @@
+# Premium SSD data volumes encrypted with the cell's disk encryption set. WaitForFirstConsumer creates the disk in
+# the zone of the pod, which the placement rules decide. Variables: ${DISK_ENCRYPTION_SET_ID}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: premium-ssd
+provisioner: disk.csi.azure.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+parameters:
+  skuName: Premium_LRS
+  cachingMode: None
+  diskEncryptionSetID: ${DISK_ENCRYPTION_SET_ID}
+  fsType: ext4

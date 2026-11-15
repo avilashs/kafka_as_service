@@ -4,10 +4,11 @@
 # present, intact and not duplicated, and the script measures how long the cell took to recover. Sourced by
 # smoke.sh after lifecycle.sh (it uses its load helpers).
 #
-# These are EMULATIONS of the AWS tests the brief asks for, they are not the AWS tests:
+# These are EMULATIONS of the cloud tests M6 asks for, they are not the cloud tests (CHAOS_PROVIDER=azure runs
+# the same faults on Azure through hack/azure/chaos.sh, not run yet):
 #   broker kill            -> same fault (SIGKILL of the broker pod through the API server)
 #   node termination       -> the node's container is stopped (kind volumes are local to the node: the broker cannot
-#                             be rescheduled, which on AWS the EBS volume allows: that part is NOT exercised)
+#                             be rescheduled, which on a cloud the managed disk allows: that part is NOT exercised)
 #   zone outage            -> every node of one zone is stopped (no NACLs: nothing is dropped on the network, the
 #                             machines just stop; the gateway is a single Envoy here, so the zone without it is chosen)
 #   disk full              -> the broker's data volume is filled by a file; same fault, 1 GiB volume
@@ -92,16 +93,16 @@ inj_node_stop() {
     [[ "$cand" != "$en" ]] && { CH_NODE=$cand; CH_POD="$LIFE_CID-brokers-$p"; break; }
   done
   [[ -n "$CH_NODE" ]] || { life_record FAIL "node stop: every broker shares a node with the gateway"; return; }
-  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then
-    "$ROOT/hack/aws/chaos.sh" node-terminate "$CH_NODE" && echo "    terminated the instance of node $CH_NODE (hosts $CH_POD)"
+  if [[ "${CHAOS_PROVIDER:-kind}" != kind ]]; then
+    "$ROOT/hack/${CHAOS_PROVIDER}/chaos.sh" node-terminate "$CH_NODE" && echo "    terminated the instance of node $CH_NODE (hosts $CH_POD)"
   else
     docker stop "$CH_NODE" >/dev/null && echo "    stopped node $CH_NODE (hosts $CH_POD)"
   fi
 }
 rec_node_stop() {
   sleep 30
-  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then
-    echo "    nothing to restart: the pod is rescheduled onto a new node and its EBS volume follows it"
+  if [[ "${CHAOS_PROVIDER:-kind}" != kind ]]; then
+    echo "    nothing to restart: the pod is rescheduled onto a new node and its managed disk follows it"
     return
   fi
   [[ -n "$CH_NODE" ]] && docker start "$CH_NODE" >/dev/null && echo "    started node $CH_NODE again"
@@ -113,10 +114,10 @@ inj_zone_stop() {
   local ez z
   ez=$(zone_of "$(envoy_node)")
   for z in zone-a zone-b zone-c; do [[ "$z" != "$ez" ]] && { CH_ZONE=$z; break; }; done
-  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then
+  if [[ "${CHAOS_PROVIDER:-kind}" != kind ]]; then
     CH_ZONE=$(kubectl get node "$(kubectl -n "$LIFE_CID" get pod "$LIFE_CID-brokers-0" -o jsonpath='{.spec.nodeName}')" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}')
-    echo "    isolating $CH_ZONE (network ACL deny rules)"
-    "$ROOT/hack/aws/chaos.sh" zone-isolate "$CH_ZONE"
+    echo "    isolating $CH_ZONE (network deny rules)"
+    "$ROOT/hack/${CHAOS_PROVIDER}/chaos.sh" zone-isolate "$CH_ZONE"
     return
   fi
   CH_ZONE_NODES=$(kubectl get nodes -l "topology.kubernetes.io/zone=$CH_ZONE" -o jsonpath='{.items[*].metadata.name}')
@@ -125,7 +126,7 @@ inj_zone_stop() {
 }
 rec_zone_stop() {
   sleep 30
-  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then "$ROOT/hack/aws/chaos.sh" zone-restore "$CH_ZONE"; return; fi
+  if [[ "${CHAOS_PROVIDER:-kind}" != kind ]]; then "$ROOT/hack/${CHAOS_PROVIDER}/chaos.sh" zone-restore "$CH_ZONE"; return; fi
   docker start $CH_ZONE_NODES >/dev/null && echo "    started the nodes of $CH_ZONE again"
   for _ in $(seq 1 60); do
     [[ "$(kubectl get nodes -l "topology.kubernetes.io/zone=$CH_ZONE" --no-headers 2>/dev/null | grep -c ' Ready')" == "$(wc -w <<<"$CH_ZONE_NODES")" ]] && break; sleep 5
@@ -222,7 +223,7 @@ scenario_chaos() {
     run_fault 4 "disk full (one broker's data volume filled)" inj_disk_full rec_disk_full no
   else
     echo "== disk full: SKIPPED. The data volume has no size limit here (kind's local-path volumes live on the node's disk, which is far larger than any test volume): filling it would fill the host."
-    LIFE_RESULTS+=("SKIP  disk full: needs a size-limited volume (EBS); not emulable on kind's local-path volumes")
+    LIFE_RESULTS+=("SKIP  disk full: needs a size-limited volume (a cloud disk); not emulable on kind's local-path volumes")
   fi
   run_fault 5 "control plane down (API, worker, Temporal, Postgres frozen) with a broker kill meanwhile" inj_control_plane_down rec_control_plane_down no
 

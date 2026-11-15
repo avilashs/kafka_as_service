@@ -11,7 +11,7 @@ import (
 // NodePoolProvider provisions the nodes of a dedicated resource.
 //
 // Implementations: internal/cloud/kind (local: claims pre-created spare nodes by
-// labelling and tainting them) and internal/cloud/aws (Karpenter NodePool per resource).
+// labelling and tainting them) and internal/cloud/karpenter (Karpenter NodePool per resource).
 type NodePoolProvider interface {
 	// Ensure makes the pool exist with (at least) the steady-state nodes of spec, labelled
 	// and tainted so that only the owner's pods can run there. Idempotent. A nil error

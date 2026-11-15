@@ -34,4 +34,4 @@ The local kind provider emulates node pools by labelling and tainting pre-create
 
 ## As prepared for M6 (not run)
 
-The Karpenter controller policies of the cell are the upstream v1.15.1 policies, vendored in `infra/aws/policies` and rendered by OpenTofu; the controller, the `EC2NodeClass` and the shared `NodePool` are installed by `deploy/aws/up.sh`. The per-cluster `NodePool` rendered by `internal/cloud/aws` has still never run against a real Karpenter.
+The provider is cloud-neutral (`internal/cloud/karpenter`): the `NodePool` is the same, the node class group and kind are configuration (AWS `EC2NodeClass`, Azure `AKSNodeClass`). On Azure the controller is the managed Node Auto Provisioning of AKS ([ADR-0019](0019-azure-for-m6.md)); the shared pool is an AKS node pool per zone, not a Karpenter pool. Nothing has run against a real Karpenter or Node Auto Provisioning.

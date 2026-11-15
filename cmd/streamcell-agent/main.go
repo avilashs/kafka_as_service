@@ -13,7 +13,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/avilashs/kafka_as_service/internal/agent"
-	awsprov "github.com/avilashs/kafka_as_service/internal/cloud/aws"
+	karpenterprov "github.com/avilashs/kafka_as_service/internal/cloud/karpenter"
 	kindprov "github.com/avilashs/kafka_as_service/internal/cloud/kind"
 	"github.com/avilashs/kafka_as_service/internal/platform/secrets"
 )
@@ -64,7 +64,8 @@ func main() {
 	case "kind":
 		a.Pools = &kindprov.Provider{Kube: a.Kube, Log: log}
 	case "karpenter":
-		a.Pools = &awsprov.Karpenter{Dyn: a.Dyn, NodeClassName: os.Getenv("KARPENTER_NODECLASS")}
+		a.Pools = &karpenterprov.Karpenter{Dyn: a.Dyn, NodeClassName: os.Getenv("KARPENTER_NODECLASS"),
+			NodeClassGroup: os.Getenv("KARPENTER_NODECLASS_GROUP"), NodeClassKind: os.Getenv("KARPENTER_NODECLASS_KIND")}
 	case "", "none":
 	default:
 		log.Error("unknown NODEPOOL_PROVIDER", "value", prov)

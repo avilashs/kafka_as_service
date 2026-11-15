@@ -1,14 +1,14 @@
 {
   "id": "${CELL_ID}",
-  "region": "${REGION}",
-  "cloud": "aws",
+  "region": "${LOCATION}",
+  "cloud": "azure",
   "state": "ACTIVE",
   "operatorShards": 1,
   "limits": { "maxClusters": 200 },
   "env": {
     "domain": "${DOMAIN}",
     "zones": ${ZONES_JSON},
-    "storageClass": "gp3",
+    "storageClass": "premium-ssd",
     "gatewayName": "streamcell-gateway",
     "gatewayNamespace": "streamcell-gateway",
     "gatewayDataPlaneNamespace": "envoy-gateway-system",
@@ -20,15 +20,15 @@
   },
   "pools": [
     {
-      "id": "${CELL_ID}-control", "kind": "control", "instanceType": "${CONTROL_INSTANCE_TYPE}", "maxNodes": 6,
+      "id": "${CELL_ID}-control", "kind": "control", "instanceType": "${CONTROL_VM_SIZE}", "maxNodes": 6,
       "zones": ${CONTROL_ZONES_JSON}
     },
     {
-      "id": "${CELL_ID}-shared", "kind": "shared", "instanceType": "${SHARED_INSTANCE_TYPE}", "maxNodes": ${SHARED_MAX_NODES},
+      "id": "${CELL_ID}-shared", "kind": "shared", "instanceType": "${SHARED_VM_SIZE}", "maxNodes": ${SHARED_MAX_NODES},
       "zones": ${SHARED_ZONES_JSON}
     },
     {
-      "id": "${CELL_ID}-dedicated", "kind": "dedicated", "instanceType": "${DEDICATED_INSTANCE_TYPE}", "maxNodes": ${DEDICATED_MAX_NODES},
+      "id": "${CELL_ID}-dedicated", "kind": "dedicated", "instanceType": "${DEDICATED_VM_SIZE}", "maxNodes": ${DEDICATED_MAX_NODES},
       "nodeCpuMilli": ${DEDICATED_CPU_MILLI}, "nodeMemoryMiB": ${DEDICATED_MEM_MIB},
       "zones": ${DEDICATED_ZONES_JSON}
     }

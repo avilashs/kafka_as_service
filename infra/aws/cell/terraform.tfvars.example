@@ -1,7 +1,0 @@
-region  = "us-east-1"
-cell_id = "aws-1"
-azs     = ["us-east-1a", "us-east-1b", "us-east-1c"]
-domain  = "streams.example.net"
-
-# Narrow this to the addresses that run bootstrap.sh and the tests.
-public_access_cidrs = ["203.0.113.0/24"]

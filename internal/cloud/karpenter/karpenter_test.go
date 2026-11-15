@@ -1,4 +1,4 @@
-package aws
+package karpenter
 
 import (
 	"reflect"
@@ -18,7 +18,7 @@ func spec() engine.NodePoolSpec {
 	}
 }
 
-// These assertions encode design §10.2 rule 3 for AWS. They check the manifest only: it has not
+// These assertions encode design §10.2 rule 3 for Karpenter. They check the manifest only: it has not
 // been applied to a real Karpenter yet (M6).
 func TestKarpenterNodePoolEnforcesDedicatedRules(t *testing.T) {
 	k := &Karpenter{NodeClassName: "streamcell-default"}
@@ -70,5 +70,14 @@ func TestKarpenterNodePoolEnforcesDedicatedRules(t *testing.T) {
 	budgets, _, _ := unstructured.NestedSlice(np.Object, "spec", "disruption", "budgets")
 	if len(budgets) != 1 || budgets[0].(map[string]any)["nodes"] != "1" {
 		t.Errorf("disruption budgets = %v, want one node at a time", budgets)
+	}
+}
+
+// The same NodePool on Azure differs only in the node class it refers to.
+func TestKarpenterNodePoolOnAzure(t *testing.T) {
+	k := &Karpenter{NodeClassName: "streamcell", NodeClassGroup: AzureNodeClassGroup, NodeClassKind: AzureNodeClassKind}
+	ref, _, _ := unstructured.NestedStringMap(k.NodePool(spec()).Object, "spec", "template", "spec", "nodeClassRef")
+	if ref["name"] != "streamcell" || ref["kind"] != "AKSNodeClass" || ref["group"] != "karpenter.azure.com" {
+		t.Errorf("nodeClassRef = %v", ref)
 	}
 }

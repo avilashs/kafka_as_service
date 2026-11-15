@@ -47,23 +47,18 @@ jobs:
       - uses: opentofu/setup-opentofu@v1
         with: { tofu_version: 1.10.6 }
       - name: fmt
-        run: tofu fmt -check -recursive -diff infra/aws
-      - name: "validate (no AWS access, init without a backend, no plan, nothing is applied)"
-        working-directory: infra/aws/cell
+        run: tofu fmt -check -recursive -diff infra
+      - name: "validate (no cloud access, init without a backend, no plan, nothing is applied)"
+        working-directory: infra/azure/cell
         run: |
           tofu init -backend=false -input=false
           tofu validate
-      - name: AWS manifests and scripts parse (nothing is applied)
+      - name: Azure manifests and scripts parse (nothing is applied)
         run: |
           curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
-          export CLUSTER_NAME=x NODE_ROLE_NAME=r KMS_KEY_ARN=arn:aws:kms:us-east-1:111122223333:key/abc \
-            SHARED_INSTANCE_TYPE=m7i.2xlarge SHARED_MAX_NODES=9 CELL_ID=aws-1 DOMAIN=example.net
-          for f in deploy/aws/manifests/*.yaml; do envsubst < "$f"; echo "---"; done | ./kubeconform -ignore-missing-schemas -strict -summary
-          export REGION=us-east-1 ZONES_JSON='["a","b","c"]' APISERVER_CIDRS_JSON='["10.0.0.1/32"]' ENGINE_IMAGES_JSON='{"4.3.1":"x"}' \
-            CONTROL_INSTANCE_TYPE=m7i.large DEDICATED_INSTANCE_TYPE=m7i.xlarge DEDICATED_MAX_NODES=9 DEDICATED_CPU_MILLI=3800 DEDICATED_MEM_MIB=14500 \
-            CONTROL_ZONES_JSON='[]' SHARED_ZONES_JSON='[]' DEDICATED_ZONES_JSON='[]'
-          envsubst < deploy/aws/cell.json.tmpl | jq -e '.pools | length == 3'
-          shellcheck -S error deploy/aws/up.sh hack/aws/chaos.sh deploy/kind/chaos.sh
+          export DISK_ENCRYPTION_SET_ID=/subscriptions/x/resourceGroups/r/providers/Microsoft.Compute/diskEncryptionSets/d CELL_ID=az-1 DOMAIN=example.net
+          for f in deploy/azure/manifests/*.yaml deploy/common/*.yaml; do envsubst < "$f"; echo "---"; done | ./kubeconform -ignore-missing-schemas -strict -summary
+          shellcheck -S error deploy/azure/up.sh hack/azure/chaos.sh deploy/kind/chaos.sh
 
   kind-real-strimzi:
     runs-on: ubuntu-latest

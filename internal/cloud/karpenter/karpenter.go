@@ -1,9 +1,10 @@
-// Package aws holds the AWS implementation of the cell's node pool provider: one
-// Karpenter NodePool per dedicated resource (ADR-0008).
+// Package karpenter holds the Karpenter implementation of the cell's node pool provider: one
+// Karpenter NodePool per dedicated resource (ADR-0008). Karpenter's NodePool is the same on every cloud; only the
+// node class it refers to differs (AWS: EC2NodeClass, Azure: AKSNodeClass of Node Auto Provisioning).
 //
-// STATUS: the manifests below are unit-tested but have NOT been run against a real
-// Karpenter or EKS cluster; that happens in M6.
-package aws
+// STATUS: the manifests below are unit-tested but have NOT been run against a real Karpenter, EKS or AKS
+// cluster; that is the part of M6 that needs a cloud account.
+package karpenter
 
 import (
 	"context"
@@ -25,12 +26,22 @@ import (
 
 var nodePoolGVR = schema.GroupVersionResource{Group: "karpenter.sh", Version: "v1", Resource: "nodepools"}
 
+// Well-known node class kinds.
+const (
+	AWSNodeClassGroup   = "karpenter.k8s.aws"
+	AWSNodeClassKind    = "EC2NodeClass"
+	AzureNodeClassGroup = "karpenter.azure.com"
+	AzureNodeClassKind  = "AKSNodeClass"
+)
+
 // Karpenter provisions dedicated pools as Karpenter NodePools.
 type Karpenter struct {
 	Dyn dynamic.Interface
-	// NodeClassName is the cell-wide EC2NodeClass (AMI, subnets, security groups, KMS-encrypted
-	// root volume, IMDSv2 hop limit 1). It is created by the cell's OpenTofu module.
+	// NodeClassName is the cell-wide node class (image, subnets, root volume, metadata options). It is
+	// installed with the cell (deploy/azure; the AWS equivalent was removed, see ADR-0019).
 	NodeClassName string
+	// NodeClassGroup and NodeClassKind identify its type; they default to the AWS ones.
+	NodeClassGroup, NodeClassKind string
 	// TerminationGracePeriod bounds how long Karpenter drains a node before forcing it.
 	TerminationGracePeriod time.Duration
 }
@@ -72,6 +83,13 @@ func (k *Karpenter) NodePool(spec engine.NodePoolSpec) *unstructured.Unstructure
 		}
 		return out
 	}
+	ncGroup, ncKind := k.NodeClassGroup, k.NodeClassKind
+	if ncGroup == "" {
+		ncGroup = AWSNodeClassGroup
+	}
+	if ncKind == "" {
+		ncKind = AWSNodeClassKind
+	}
 	obj := map[string]any{
 		"apiVersion": "karpenter.sh/v1",
 		"kind":       "NodePool",
@@ -83,7 +101,7 @@ func (k *Karpenter) NodePool(spec engine.NodePoolSpec) *unstructured.Unstructure
 			"template": map[string]any{
 				"metadata": map[string]any{"labels": nodeLabels},
 				"spec": map[string]any{
-					"nodeClassRef": map[string]any{"group": "karpenter.k8s.aws", "kind": "EC2NodeClass", "name": k.NodeClassName},
+					"nodeClassRef": map[string]any{"group": ncGroup, "kind": ncKind, "name": k.NodeClassName},
 					"taints":       taints,
 					"requirements": []any{
 						map[string]any{"key": "node.kubernetes.io/instance-type", "operator": "In", "values": toAny(spec.InstanceType)},
