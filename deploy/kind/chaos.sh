@@ -130,6 +130,17 @@ rec_zone_stop() {
   done
 }
 
+# disk_full_possible: the broker's data volume must be small. The fault writes until the volume is full; on a volume
+# without a limit that would be the disk of the machine (a first attempt on kind took down the CI runner, exit 137).
+disk_full_possible() {
+  local d free max=${DISK_FULL_MAX_KB:-20971520}
+  d=$(kubectl -n "$LIFE_CID" exec -c kafka "$LIFE_CID-brokers-2" -- sh -c 'ls -d /var/lib/kafka/data* 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+  [[ -n "$d" ]] || return 1
+  free=$(kubectl -n "$LIFE_CID" exec -c kafka "$LIFE_CID-brokers-2" -- sh -c 'df -Pk '"$d"' | awk "NR==2{print \$4}"' 2>/dev/null | tr -d '\r')
+  echo "    data directory $d has ${free:-?} KiB free (limit for this fault: $max KiB)"
+  [[ -n "$free" && "$free" -le "$max" ]]
+}
+
 inj_disk_full() {
   CH_POD="$LIFE_CID-brokers-2"
   CH_DATA=$(kubectl -n "$LIFE_CID" exec -c kafka "$CH_POD" -- sh -c 'ls -d /var/lib/kafka/data* 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
@@ -205,7 +216,12 @@ scenario_chaos() {
   run_fault 1 "broker kill (SIGKILL of one broker pod)" inj_broker_kill rec_none no
   run_fault 2 "node stop (the node of one broker; emulates node termination)" inj_node_stop rec_node_stop yes
   run_fault 3 "zone stop (every node of one zone; emulates a zone outage)" inj_zone_stop rec_zone_stop yes
-  run_fault 4 "disk full (one broker's data volume filled)" inj_disk_full rec_disk_full no
+  if disk_full_possible; then
+    run_fault 4 "disk full (one broker's data volume filled)" inj_disk_full rec_disk_full no
+  else
+    echo "== disk full: SKIPPED. The data volume has no size limit here (kind's local-path volumes live on the node's disk, which is far larger than any test volume): filling it would fill the host."
+    LIFE_RESULTS+=("SKIP  disk full: needs a size-limited volume (EBS); not emulable on kind's local-path volumes")
+  fi
   run_fault 5 "control plane down (API, worker, Temporal, Postgres frozen) with a broker kill meanwhile" inj_control_plane_down rec_control_plane_down no
 
   echo "== delete"
