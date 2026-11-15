@@ -1,0 +1,16 @@
+# Alerting rules for the cell's own components. Every alert carries a runbook_url that resolves to a file in
+# docs/runbooks/ (internal/placement/alerts_test.go enforces that).
+groups:
+  - name: streamcell-platform
+    rules:
+      - alert: StreamcellWebhookCertExpiring
+        # cert-manager's metric; the placement webhooks use failurePolicy Fail, an expired certificate stops all binds.
+        expr: (certmanager_certificate_expiration_timestamp_seconds{namespace="streamcell-system", name="streamcell-admission-tls"} - time()) < 14 * 24 * 3600
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "The serving certificate of the placement webhooks expires in less than 14 days"
+          description: >-
+            cert-manager renews it 30 days before the end, so this means renewal is failing.
+          runbook_url: "docs/runbooks/webhook-cert-expiry.md"

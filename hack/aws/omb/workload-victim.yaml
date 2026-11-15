@@ -1,0 +1,13 @@
+# The tenant whose latency is measured: moderate, steady load.
+name: victim-1KB-6p-30k
+topics: 1
+partitionsPerTopic: 6
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 1
+consumerPerSubscription: 3
+producersPerTopic: 3
+producerRate: 30000
+consumerBacklogSizeGB: 0
+testDurationMinutes: 10
+warmupDurationMinutes: 2

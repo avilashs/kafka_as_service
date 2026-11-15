@@ -1,0 +1,48 @@
+# Serving certificate of the placement webhooks from cert-manager (replaces the 10-year certificate of the
+# certgen job; design section 10.2: an expired certificate with failurePolicy Fail stops every bind).
+# Valid 90 days, renewed 30 days before the end; the alert StreamcellWebhookCertExpiring watches it.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: streamcell-selfsigned
+  namespace: streamcell-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: streamcell-webhook-ca
+  namespace: streamcell-system
+spec:
+  isCA: true
+  commonName: streamcell-webhook-ca
+  secretName: streamcell-webhook-ca
+  duration: 8760h
+  renewBefore: 720h
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef: { name: streamcell-selfsigned, kind: Issuer }
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: streamcell-webhook-ca
+  namespace: streamcell-system
+spec:
+  ca:
+    secretName: streamcell-webhook-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: streamcell-admission-tls
+  namespace: streamcell-system
+spec:
+  secretName: streamcell-admission-tls
+  duration: 2160h
+  renewBefore: 720h
+  dnsNames:
+    - streamcell-admission.streamcell-system.svc
+    - streamcell-admission.streamcell-system.svc.cluster.local
+  privateKey: { algorithm: ECDSA, size: 256 }
+  issuerRef: { name: streamcell-webhook-ca, kind: Issuer }

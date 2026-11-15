@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowInterruptionQueueActions",
+      "Effect": "Allow",
+      "Resource": "${interruption_queue_arn}",
+      "Action": [
+        "sqs:DeleteMessage",
+        "sqs:GetQueueUrl",
+        "sqs:ReceiveMessage"
+      ]
+    }
+  ]
+}

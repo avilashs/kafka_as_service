@@ -1,0 +1,35 @@
+# gp3 data volumes encrypted with the cell key. WaitForFirstConsumer binds the volume to the zone of the pod,
+# which the placement rules and the zone-aware rack assignment decide. Variables: ${KMS_KEY_ARN}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+parameters:
+  type: gp3
+  encrypted: "true"
+  kmsKeyId: ${KMS_KEY_ARN}
+  csi.storage.k8s.io/fstype: ext4
+---
+# Provisioned performance per broker size, applied through VolumeAttributesClass (ADR-0011). Not yet referenced
+# by the Kafka engine: today every size gets the gp3 baseline (3000 IOPS, 125 MiB/s).
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: gp3-small
+driverName: ebs.csi.aws.com
+parameters:
+  iops: "3000"
+  throughput: "125"
+---
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: gp3-large
+driverName: ebs.csi.aws.com
+parameters:
+  iops: "6000"
+  throughput: "400"

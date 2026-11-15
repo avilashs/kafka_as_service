@@ -89,10 +89,18 @@ inj_node_stop() {
     [[ "$cand" != "$en" ]] && { CH_NODE=$cand; CH_POD="$LIFE_CID-brokers-$p"; break; }
   done
   [[ -n "$CH_NODE" ]] || { life_record FAIL "node stop: every broker shares a node with the gateway"; return; }
-  docker stop "$CH_NODE" >/dev/null && echo "    stopped node $CH_NODE (hosts $CH_POD)"
+  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then
+    "$ROOT/hack/aws/chaos.sh" node-terminate "$CH_NODE" && echo "    terminated the instance of node $CH_NODE (hosts $CH_POD)"
+  else
+    docker stop "$CH_NODE" >/dev/null && echo "    stopped node $CH_NODE (hosts $CH_POD)"
+  fi
 }
 rec_node_stop() {
   sleep 30
+  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then
+    echo "    nothing to restart: the pod is rescheduled onto a new node and its EBS volume follows it"
+    return
+  fi
   [[ -n "$CH_NODE" ]] && docker start "$CH_NODE" >/dev/null && echo "    started node $CH_NODE again"
   for _ in $(seq 1 60); do [[ "$(kubectl get node "$CH_NODE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == True ]] && break; sleep 5; done
 }
@@ -102,12 +110,19 @@ inj_zone_stop() {
   local ez z
   ez=$(zone_of "$(envoy_node)")
   for z in zone-a zone-b zone-c; do [[ "$z" != "$ez" ]] && { CH_ZONE=$z; break; }; done
+  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then
+    CH_ZONE=$(kubectl get node "$(kubectl -n "$LIFE_CID" get pod "$LIFE_CID-brokers-0" -o jsonpath='{.spec.nodeName}')" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}')
+    echo "    isolating $CH_ZONE (network ACL deny rules)"
+    "$ROOT/hack/aws/chaos.sh" zone-isolate "$CH_ZONE"
+    return
+  fi
   CH_ZONE_NODES=$(kubectl get nodes -l "topology.kubernetes.io/zone=$CH_ZONE" -o jsonpath='{.items[*].metadata.name}')
   echo "    gateway is in $ez; stopping every node of $CH_ZONE: $CH_ZONE_NODES"
   docker stop $CH_ZONE_NODES >/dev/null
 }
 rec_zone_stop() {
   sleep 30
+  if [[ "${CHAOS_PROVIDER:-kind}" == aws ]]; then "$ROOT/hack/aws/chaos.sh" zone-restore "$CH_ZONE"; return; fi
   docker start $CH_ZONE_NODES >/dev/null && echo "    started the nodes of $CH_ZONE again"
   for _ in $(seq 1 60); do
     [[ "$(kubectl get nodes -l "topology.kubernetes.io/zone=$CH_ZONE" --no-headers 2>/dev/null | grep -c ' Ready')" == "$(wc -w <<<"$CH_ZONE_NODES")" ]] && break; sleep 5

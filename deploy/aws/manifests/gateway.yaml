@@ -1,0 +1,68 @@
+# The cell gateway on AWS: Envoy Gateway proxies behind one NLB, one proxy per zone, cross-zone load balancing
+# off so a client is served in the zone its NLB node is in (ADR-0005). TLS passthrough, SNI routing to the
+# Strimzi tlsroute listeners. Variables: ${CELL_ID} ${DOMAIN}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: streamcell
+  namespace: streamcell-gateway
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: 3
+        pod:
+          nodeSelector:
+            streamcell.dev/pool: control
+          tolerations:
+            - { key: streamcell.dev/control, operator: Exists, effect: NoSchedule }
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: topology.kubernetes.io/zone
+              whenUnsatisfiable: DoNotSchedule
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: envoy
+      envoyService:
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: external
+          service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+          service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+          service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=false
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: streamcell
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: streamcell
+    namespace: streamcell-gateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: streamcell-gateway
+  namespace: streamcell-gateway
+spec:
+  gatewayClassName: streamcell
+  listeners:
+    - name: kafka-tls
+      protocol: TLS
+      port: 443
+      hostname: "*.${CELL_ID}.${DOMAIN}"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        kinds: [{ group: gateway.networking.k8s.io, kind: TLSRoute }]
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - { key: streamcell.dev/inventory, operator: Exists }

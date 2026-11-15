@@ -1,0 +1,13 @@
+# The noisy neighbour: another tenant on the same shared nodes, pushing as hard as it is allowed to.
+name: noisy-1KB-12p-max
+topics: 1
+partitionsPerTopic: 12
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 2
+consumerPerSubscription: 6
+producersPerTopic: 6
+producerRate: 400000
+consumerBacklogSizeGB: 0
+testDurationMinutes: 14
+warmupDurationMinutes: 0

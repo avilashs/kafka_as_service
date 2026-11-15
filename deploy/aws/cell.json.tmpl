@@ -1,0 +1,36 @@
+{
+  "id": "${CELL_ID}",
+  "region": "${REGION}",
+  "cloud": "aws",
+  "state": "ACTIVE",
+  "operatorShards": 1,
+  "limits": { "maxClusters": 200 },
+  "env": {
+    "domain": "${DOMAIN}",
+    "zones": ${ZONES_JSON},
+    "storageClass": "gp3",
+    "gatewayName": "streamcell-gateway",
+    "gatewayNamespace": "streamcell-gateway",
+    "gatewayDataPlaneNamespace": "envoy-gateway-system",
+    "apiServerCIDRs": ${APISERVER_CIDRS_JSON},
+    "engineImages": ${ENGINE_IMAGES_JSON},
+    "dedicatedSurge": 1,
+    "monitoringNamespace": "streamcell-monitoring",
+    "operatorNamespace": "streamcell-operators"
+  },
+  "pools": [
+    {
+      "id": "${CELL_ID}-control", "kind": "control", "instanceType": "${CONTROL_INSTANCE_TYPE}", "maxNodes": 6,
+      "zones": ${CONTROL_ZONES_JSON}
+    },
+    {
+      "id": "${CELL_ID}-shared", "kind": "shared", "instanceType": "${SHARED_INSTANCE_TYPE}", "maxNodes": ${SHARED_MAX_NODES},
+      "zones": ${SHARED_ZONES_JSON}
+    },
+    {
+      "id": "${CELL_ID}-dedicated", "kind": "dedicated", "instanceType": "${DEDICATED_INSTANCE_TYPE}", "maxNodes": ${DEDICATED_MAX_NODES},
+      "nodeCpuMilli": ${DEDICATED_CPU_MILLI}, "nodeMemoryMiB": ${DEDICATED_MEM_MIB},
+      "zones": ${DEDICATED_ZONES_JSON}
+    }
+  ]
+}

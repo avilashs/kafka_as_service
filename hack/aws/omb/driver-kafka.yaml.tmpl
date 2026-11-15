@@ -1,0 +1,22 @@
+# OpenMessaging Benchmark Kafka driver for a Streamcell cluster, through its public endpoint (SCRAM over TLS).
+# Variables: ${BOOTSTRAP} ${USER} ${PASSWORD} ${CA_PATH}. Not run yet (M6 prepared offline).
+name: Kafka
+driverClass: io.openmessaging.benchmark.driver.kafka.KafkaBenchmarkDriver
+replicationFactor: 3
+reset: false
+topicConfig: |
+  min.insync.replicas=2
+commonConfig: |
+  bootstrap.servers=${BOOTSTRAP}
+  security.protocol=SASL_SSL
+  sasl.mechanism=SCRAM-SHA-512
+  sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${USER}" password="${PASSWORD}";
+  ssl.truststore.type=PEM
+  ssl.truststore.location=${CA_PATH}
+producerConfig: |
+  acks=all
+  linger.ms=1
+  batch.size=131072
+consumerConfig: |
+  auto.offset.reset=earliest
+  enable.auto.commit=false
