@@ -14,7 +14,8 @@
 #   control plane down     -> API, worker, Temporal and Postgres are frozen while a broker is killed
 # Not run here: the noisy-neighbour benchmark and dedicated versus shared (they need real instances).
 
-CH_FILLER=/var/lib/kafka/data-0/streamcell-filler
+CH_DATA=""    # the broker data directory as mounted in the pod (data or data-<id>, found at run time)
+CH_FILLER=""
 
 ch_cid() { echo "$LIFE_CID"; }
 cluster_state() { api_as "$TENANT_TOKEN" GET "/v1/clusters/$LIFE_CID" 2>/dev/null | jq -r '.state + "|" + (.stateReason // "")' 2>/dev/null || echo "unreachable|"; }
@@ -131,7 +132,14 @@ rec_zone_stop() {
 
 inj_disk_full() {
   CH_POD="$LIFE_CID-brokers-2"
-  kubectl -n "$LIFE_CID" exec -c kafka "$CH_POD" -- sh -c 'a=$(df -Pk /var/lib/kafka/data-0 | awk "NR==2{print \$4}"); echo "    free before: ${a} KiB"; head -c $(( (a - 1024) * 1024 )) /dev/zero > '"$CH_FILLER"'; df -Pk /var/lib/kafka/data-0 | tail -1 | sed "s/^/    after: /"' 2>&1 | tail -3
+  CH_DATA=$(kubectl -n "$LIFE_CID" exec -c kafka "$CH_POD" -- sh -c 'ls -d /var/lib/kafka/data* 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+  if [[ -z "$CH_DATA" ]]; then life_record FAIL "disk full: no data directory found in $CH_POD (/var/lib/kafka)"; return; fi
+  CH_FILLER="$CH_DATA/streamcell-filler"
+  local out free
+  out=$(kubectl -n "$LIFE_CID" exec -c kafka "$CH_POD" -- sh -c 'd='"$CH_DATA"'; a=$(df -Pk "$d" | awk "NR==2{print \$4}"); echo "    free before: ${a} KiB in $d"; head -c $(( (a - 1024) * 1024 )) /dev/zero > '"$CH_FILLER"'; df -Pk "$d" | tail -1 | sed "s/^/    after: /"' 2>&1 | tail -3)
+  echo "$out"
+  free=$(awk '/after:/{print $5}' <<<"$out")
+  if [[ -n "$free" && "$free" -lt 4096 ]]; then life_record PASS "disk full: the data volume of $CH_POD is full ($free KiB free)"; else life_record FAIL "disk full: could not fill the volume (free: '${free:-unknown}' KiB)"; fi
 }
 rec_disk_full() {
   local r0 r i
@@ -141,6 +149,7 @@ rec_disk_full() {
   kubectl -n "$LIFE_CID" logs -c kafka "$CH_POD" --tail=400 2>/dev/null | grep -iE 'No space left|log dir|LogDirFailure|offline|shutting down' | tail -4 | cut -c1-240 | sed 's/^/    log: /' || true
   # the runbook's first step: free the space (the container may be restarting; try until an exec gets through)
   for i in $(seq 1 150); do
+    [[ -n "$CH_FILLER" ]] || return
     if kubectl -n "$LIFE_CID" exec -c kafka "$CH_POD" -- rm -f "$CH_FILLER" >/dev/null 2>&1; then echo "    filler removed after $i attempt(s)"; return; fi
     sleep 2
   done
