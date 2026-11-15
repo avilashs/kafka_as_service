@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: "kind smoke scenario (all, dedicated, shared, connect, lifecycle, observe)"
+        description: "kind smoke scenario (all, dedicated, shared, connect, lifecycle, observe, chaos)"
         default: all
 permissions:
   contents: read
@@ -42,7 +42,7 @@ jobs:
 
   kind-real-strimzi:
     runs-on: ubuntu-latest
-    timeout-minutes: 170
+    timeout-minutes: 260
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

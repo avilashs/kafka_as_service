@@ -17,7 +17,10 @@
 #   observe    M5: canary detects injected outages (DEGRADED and back); metering reconciles with a sampled
 #              timeline across a frozen control plane and an agent restart. Implemented in observe.sh.
 #
-# usage: smoke.sh [dedicated|shared|connect|lifecycle|observe|all]
+#   chaos      M6 (kind emulation): broker kill, node stop, zone stop, disk full, control plane down, each under
+#              acks=all load with the verifier. Implemented in chaos.sh.
+#
+# usage: smoke.sh [dedicated|shared|connect|lifecycle|observe|chaos|all]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 STATE="$ROOT/.cache/kind"
@@ -335,6 +338,8 @@ source "$ROOT/deploy/kind/connect.sh"
 source "$ROOT/deploy/kind/lifecycle.sh"
 # shellcheck source=deploy/kind/observe.sh
 source "$ROOT/deploy/kind/observe.sh"
+# shellcheck source=deploy/kind/chaos.sh
+source "$ROOT/deploy/kind/chaos.sh"
 
 case "${1:-all}" in
   dedicated) scenario_dedicated ;;
@@ -342,7 +347,8 @@ case "${1:-all}" in
   connect)   scenario_connect ;;
   lifecycle) scenario_lifecycle ;;
   observe)   scenario_observe ;;
-  all)       scenario_dedicated; scenario_shared; scenario_connect; scenario_lifecycle; scenario_observe ;;
+  chaos)     scenario_chaos ;;
+  all)       scenario_dedicated; scenario_shared; scenario_connect; scenario_lifecycle; scenario_observe; scenario_chaos ;;
   *) echo "usage: $0 [dedicated|shared|connect|lifecycle|observe|all]" >&2; exit 2 ;;
 esac
 echo PASS
