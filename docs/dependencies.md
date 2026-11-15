@@ -112,3 +112,15 @@ M3 additions: `alpine/socat` (GPL-2.0 tool, run only as a throw-away container i
 | Grafana, Loki, Mimir (as shipped dependencies) | AGPL-3.0. Allowed only as an optional, unmodified add-on that operators install themselves. |
 | Redpanda, Confluent Server, and any proprietary or source-available Kafka distribution | Not stock Apache Kafka, and the licences fail the rules above |
 | Kafka protocol proxies in the data path (e.g. Kroxylicious) | Ruled out by the brief: the data path must not parse Kafka requests |
+
+## Added in M6 (prepared, not run on AWS)
+
+| Component | Version | Licence | Use | Status / notes |
+|---|---|---|---|---|
+| OpenTofu | 1.10.x | MPL-2.0 | `infra/aws/cell` ([ADR-0014](adr/0014-opentofu.md)) | `fmt` and `validate` in CI; never applied |
+| `hashicorp/aws` OpenTofu provider | ~> 5.80 | MPL-2.0 | AWS resources of the cell | validated only |
+| Karpenter IAM policies | upstream v1.15.1 (`cloudformation.yaml`) | Apache-2.0 | vendored as templates in `infra/aws/policies` | converted to JSON by a script; the upstream template is the source |
+| AWS Load Balancer Controller IAM policy | upstream v2.15.0 (`iam_policy.json`) | Apache-2.0 | vendored in `infra/aws/policies` | |
+| cert-manager | v1.18.x | Apache-2.0 | placement webhook serving certificate (AWS cell) | chart version written from memory, not installed |
+| kubeconform | v0.7.0 | Apache-2.0 | CI check that the AWS manifests parse | CI only |
+| OpenMessaging Benchmark | current | Apache-2.0 | noisy-neighbour comparison (`hack/aws/omb`) | not run |

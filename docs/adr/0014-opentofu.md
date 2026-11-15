@@ -1,6 +1,6 @@
 # ADR-0014: OpenTofu for cell infrastructure
 
-**Status:** Proposed
+**Status:** Accepted; the module exists (`infra/aws/cell`) and passes `tofu fmt` and `tofu validate` in CI. It has never been planned or applied against AWS (M6).
 
 ## Decision
 

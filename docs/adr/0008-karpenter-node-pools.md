@@ -31,3 +31,7 @@ The local kind provider emulates node pools by labelling and tainting pre-create
 - `NodePoolProvider` (`internal/cloud`) has two implementations. **kind** claims pre-created spare nodes. **AWS** renders a Karpenter v1 `NodePool` per dedicated cluster; its manifest is unit-tested against the verified v1.15.1 field names but has **not** run against a real Karpenter yet (M6).
 - Spare nodes in kind carry a `streamcell.dev/spare` taint so that only DaemonSets run on them; without it CoreDNS or the gateway can land on a spare node and the provider (rightly) refuses to claim a node that runs workloads. Claiming swaps that taint for the owner's taint in one update.
 - Capacity: a dedicated pool is a per-instance-type, per-zone budget of whole nodes; a cluster reserves one node per broker and the pod must fit the node shape. Surge nodes are not yet reserved (they come from `limits.nodes` headroom); reserving them belongs with node rotation in M4.
+
+## As prepared for M6 (not run)
+
+The Karpenter controller policies of the cell are the upstream v1.15.1 policies, vendored in `infra/aws/policies` and rendered by OpenTofu; the controller, the `EC2NodeClass` and the shared `NodePool` are installed by `deploy/aws/up.sh`. The per-cluster `NodePool` rendered by `internal/cloud/aws` has still never run against a real Karpenter.
